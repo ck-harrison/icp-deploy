@@ -1,0 +1,5 @@
+node_modules/
+.deploy-history.json
+.DS_Store
+*.log
+.claude/

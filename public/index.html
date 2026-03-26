@@ -1,0 +1,1956 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ICP Deploy Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            icp: { 50: '#f0f4ff', 100: '#dbe4ff', 200: '#bac8ff', 400: '#748ffc', 500: '#4c6ef5', 600: '#3b5bdb', 700: '#364fc7', 800: '#1e3a8a', 900: '#0f172a' },
+            surface: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #0f172a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .log-container { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+    .log-container::-webkit-scrollbar { width: 6px; }
+    .log-container::-webkit-scrollbar-track { background: transparent; }
+    .log-container::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(76, 110, 245, 0.4); } 50% { box-shadow: 0 0 12px 4px rgba(76, 110, 245, 0.2); } }
+    .deploying { animation: pulse-glow 2s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { animation: spin 1s linear infinite; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ---- API helpers ----
+    const api = {
+      async get(url) {
+        const r = await fetch(url);
+        return r.json();
+      },
+      async post(url, body) {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        return r.json();
+      },
+    };
+
+    // ---- Icon components ----
+    function FolderIcon({ className = 'w-5 h-5' }) {
+      return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
+        </svg>
+      );
+    }
+
+    function ChevronIcon({ className = 'w-4 h-4', direction = 'right' }) {
+      const rotation = { right: '', down: 'rotate-90', left: 'rotate-180', up: '-rotate-90' };
+      return (
+        <svg className={`${className} ${rotation[direction]}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+        </svg>
+      );
+    }
+
+    function RocketIcon({ className = 'w-5 h-5' }) {
+      return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 0 1-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 0 0 6.16-12.12A14.98 14.98 0 0 0 9.631 8.41m5.96 5.96a14.926 14.926 0 0 1-5.841 2.58m-.119-8.54a6 6 0 0 0-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 0 0-2.58 5.84m2.699 2.7c-.103.021-.207.041-.311.06a15.09 15.09 0 0 1-2.448-2.448 14.9 14.9 0 0 1 .06-.312m-2.24 2.39a4.493 4.493 0 0 0-1.757 4.306 4.493 4.493 0 0 0 4.306-1.758M16.5 9a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" />
+        </svg>
+      );
+    }
+
+    function SpinnerIcon({ className = 'w-5 h-5' }) {
+      return (
+        <svg className={`${className} spinner`} fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      );
+    }
+
+    // ---- Folder Browser Modal ----
+    function FolderBrowser({ isOpen, onClose, onSelect }) {
+      const [currentPath, setCurrentPath] = useState('');
+      const [entries, setEntries] = useState([]);
+      const [loading, setLoading] = useState(false);
+
+      const browse = useCallback(async (path) => {
+        setLoading(true);
+        try {
+          const data = await api.post('/api/browse', { path: path || undefined });
+          setCurrentPath(data.current);
+          setEntries(data.entries);
+        } catch (e) {
+          console.error(e);
+        }
+        setLoading(false);
+      }, []);
+
+      useEffect(() => {
+        if (isOpen) browse('');
+      }, [isOpen, browse]);
+
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-lg shadow-2xl">
+            <div className="p-4 border-b border-surface-700 flex items-center justify-between">
+              <h3 className="text-white font-semibold">Select Project Folder</h3>
+              <button onClick={onClose} className="text-gray-400 hover:text-white text-xl">&times;</button>
+            </div>
+            <div className="p-3 bg-surface-950 border-b border-surface-700">
+              <div className="flex items-center gap-2 text-sm text-gray-400 font-mono">
+                <FolderIcon className="w-4 h-4 text-icp-400 shrink-0" />
+                <span className="truncate">{currentPath}</span>
+              </div>
+            </div>
+            <div className="max-h-80 overflow-y-auto p-2">
+              {currentPath && (
+                <button
+                  onClick={() => {
+                    const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
+                    browse(parent);
+                  }}
+                  className="w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-surface-800 text-gray-300"
+                >
+                  <ChevronIcon direction="left" className="w-4 h-4 text-gray-500" />
+                  <span className="text-sm">..</span>
+                </button>
+              )}
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <SpinnerIcon className="w-6 h-6 text-icp-400" />
+                </div>
+              ) : (
+                entries.map((entry) => (
+                  <button
+                    key={entry.path}
+                    onClick={() => {
+                      if (entry.hasDfxJson) {
+                        onSelect(entry.path);
+                        onClose();
+                      } else {
+                        browse(entry.path);
+                      }
+                    }}
+                    className={`w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-surface-800 transition-colors ${
+                      entry.hasDfxJson ? 'bg-icp-500/10 border border-icp-500/20' : ''
+                    }`}
+                  >
+                    <FolderIcon className={`w-5 h-5 ${entry.hasDfxJson ? 'text-icp-400' : 'text-gray-500'}`} />
+                    <div className="flex-1 text-left">
+                      <span className={`text-sm ${entry.hasDfxJson ? 'text-white font-medium' : 'text-gray-300'}`}>
+                        {entry.name}
+                      </span>
+                    </div>
+                    {entry.hasDfxJson ? (
+                      <span className="text-[11px] bg-icp-500/20 text-icp-400 px-2 py-0.5 rounded-full font-medium">
+                        dfx project
+                      </span>
+                    ) : (
+                      <ChevronIcon className="w-4 h-4 text-gray-600" />
+                    )}
+                  </button>
+                ))
+              )}
+              {!loading && entries.length === 0 && (
+                <p className="text-center text-gray-500 py-8 text-sm">No folders found</p>
+              )}
+            </div>
+            <div className="p-3 border-t border-surface-700 flex justify-between items-center">
+              <p className="text-xs text-gray-500">Click a highlighted folder to select it</p>
+              <button onClick={onClose} className="text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-surface-800">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Confirmation Modal ----
+    function ConfirmModal({ isOpen, title, message, danger, onConfirm, onCancel }) {
+      if (!isOpen) return null;
+      return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
+            <div className="p-5">
+              <h3 className={`text-base font-semibold ${danger ? 'text-red-400' : 'text-white'} mb-2`}>{title}</h3>
+              <p className="text-sm text-gray-400">{message}</p>
+            </div>
+            <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
+              <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
+              <button onClick={onConfirm} className={`px-4 py-2 text-sm font-medium rounded-lg ${danger ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-icp-500 hover:bg-icp-600 text-white'}`}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Reinstall Confirm Modal (quadruple confirmation) ----
+    function ReinstallConfirmModal({ isOpen, canisterCount, network, onConfirm, onCancel }) {
+      const [step, setStep] = useState(1);
+      const [typed, setTyped] = useState('');
+      const REQUIRED_PHRASE = 'i will wipe all my app data';
+
+      // Reset when opened/closed
+      React.useEffect(() => {
+        if (isOpen) { setStep(1); setTyped(''); }
+      }, [isOpen]);
+
+      if (!isOpen) return null;
+
+      const isMainnet = network === 'ic';
+      const stepContent = {
+        1: {
+          title: 'DANGER: Reinstall Mode Selected',
+          body: (
+            <div className="space-y-3">
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                <p className="text-sm text-red-300 font-semibold">Reinstall completely destroys all canister state.</p>
+              </div>
+              <p className="text-sm text-gray-400">This means:</p>
+              <ul className="text-sm text-gray-400 list-disc list-inside space-y-1">
+                <li>All stored data will be <span className="text-red-400 font-semibold">permanently erased</span></li>
+                <li>All user accounts, balances, and records will be <span className="text-red-400 font-semibold">gone forever</span></li>
+                <li>The canister will be wiped clean and re-initialized from scratch</li>
+                <li>There is <span className="text-red-400 font-semibold">no undo</span></li>
+              </ul>
+              <p className="text-sm text-gray-500 mt-2">If you want to update your code while keeping data, use <span className="text-icp-400">Upgrade</span> mode instead.</p>
+            </div>
+          ),
+          button: 'I understand the risk',
+        },
+        2: {
+          title: 'Are you absolutely sure?',
+          body: (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-400">
+                You are about to reinstall <span className="text-white font-semibold">{canisterCount} canister(s)</span>
+                {isMainnet && <span className="text-red-400 font-semibold"> on MAINNET</span>}.
+              </p>
+              {isMainnet && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                  <p className="text-sm text-red-300 font-semibold">This is a PRODUCTION environment. Real users may be affected.</p>
+                </div>
+              )}
+              <p className="text-sm text-gray-400">This action is <span className="text-red-400 font-semibold">irreversible</span>. No backup will be created automatically. If you have not taken a snapshot, your data is gone.</p>
+            </div>
+          ),
+          button: 'Yes, I am sure',
+        },
+        3: {
+          title: 'Final safety check',
+          body: (
+            <div className="space-y-3">
+              <p className="text-sm text-gray-400">Type the following phrase exactly to proceed:</p>
+              <div className="p-3 bg-surface-800 border border-surface-700 rounded-lg">
+                <p className="text-sm text-white font-mono text-center select-none">{REQUIRED_PHRASE}</p>
+              </div>
+              <input
+                type="text"
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="Type the phrase above..."
+                className="w-full px-3 py-2.5 bg-surface-950 border border-surface-700 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-red-500"
+                autoFocus
+              />
+              {typed.length > 0 && typed.toLowerCase() !== REQUIRED_PHRASE && (
+                <p className="text-xs text-red-400">Phrase does not match.</p>
+              )}
+            </div>
+          ),
+          button: 'Proceed to final confirmation',
+          disabled: typed.toLowerCase() !== REQUIRED_PHRASE,
+        },
+        4: {
+          title: 'LAST CHANCE — Point of no return',
+          body: (
+            <div className="space-y-3">
+              <div className="p-4 bg-red-500/15 border-2 border-red-500/40 rounded-lg text-center">
+                <p className="text-red-400 font-bold text-base">ALL DATA WILL BE PERMANENTLY DESTROYED</p>
+                <p className="text-red-300/80 text-sm mt-1">{canisterCount} canister(s){isMainnet ? ' on MAINNET' : ''}</p>
+              </div>
+              <p className="text-sm text-gray-500 text-center">Click the button below to execute the reinstall. This is your last chance to cancel.</p>
+            </div>
+          ),
+          button: 'WIPE DATA AND REINSTALL',
+        },
+      };
+
+      const current = stepContent[step];
+
+      return (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border-2 border-red-500/40 rounded-2xl w-full max-w-lg shadow-2xl">
+            {/* Step indicator */}
+            <div className="px-5 pt-4 flex items-center gap-1.5">
+              {[1,2,3,4].map((s) => (
+                <div key={s} className={`h-1 flex-1 rounded-full transition-colors ${s <= step ? 'bg-red-500' : 'bg-surface-700'}`} />
+              ))}
+            </div>
+            <div className="px-5 pt-3 pb-1">
+              <p className="text-[11px] text-red-400/60 uppercase tracking-wider font-medium">Step {step} of 4</p>
+            </div>
+            <div className="px-5 pb-2">
+              <h3 className="text-base font-bold text-red-400">{current.title}</h3>
+            </div>
+            <div className="px-5 pb-4">
+              {current.body}
+            </div>
+            <div className="p-4 border-t border-surface-700 flex justify-between">
+              <button onClick={step === 1 ? onCancel : () => setStep(step - 1)} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">
+                {step === 1 ? 'Cancel' : 'Back'}
+              </button>
+              <div className="flex gap-2">
+                {step > 1 && (
+                  <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-300 rounded-lg">Cancel</button>
+                )}
+                <button
+                  onClick={() => step < 4 ? setStep(step + 1) : onConfirm()}
+                  disabled={current.disabled}
+                  className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+                    step === 4
+                      ? 'bg-red-600 hover:bg-red-700 text-white ring-1 ring-red-500'
+                      : 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30'
+                  }`}
+                >
+                  {current.button}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Snapshots Tab ----
+    function SnapshotsTab({ projectPath, projectLoaded, network, canisters }) {
+      const networkLabel = network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1);
+      const [selectedCanister, setSelectedCanister] = useState('');
+      const [snapshots, setSnapshots] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [actionLoading, setActionLoading] = useState(null); // 'create' | 'load:ID' | 'delete:ID' | 'download:ID' | 'upload'
+      const [message, setMessage] = useState(null); // { type: 'success'|'error'|'info', text }
+      const [downloadDir, setDownloadDir] = useState('');
+      const [uploadDir, setUploadDir] = useState('');
+      const [showDownloadInput, setShowDownloadInput] = useState(null); // snapshot ID
+      const [showUploadInput, setShowUploadInput] = useState(false);
+      const [confirmAction, setConfirmAction] = useState(null);
+      const [canisterStatus, setCanisterStatus] = useState(null); // 'Running' | 'Stopped' | null
+      const [metadata, setMetadata] = useState(null);
+
+      // Auto-select first canister
+      useEffect(() => {
+        if (canisters.length > 0 && !selectedCanister) {
+          setSelectedCanister(canisters[0].name);
+        }
+      }, [canisters]);
+
+      // Fetch snapshots + status when canister changes
+      const fetchSnapshots = useCallback(async () => {
+        if (!selectedCanister || !projectPath) return;
+        setLoading(true);
+        setMessage(null);
+        try {
+          const [snapData, statusData] = await Promise.all([
+            api.post('/api/canister/snapshots', { path: projectPath, canister: selectedCanister, network }),
+            api.post('/api/canister/status', { path: projectPath, canister: selectedCanister, network }),
+          ]);
+          if (snapData.error) {
+            const notDeployed = snapData.error.includes('Cannot find canister id');
+            setMessage({ type: notDeployed ? 'warn' : 'error', text: notDeployed ? `Not deployed on ${network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network} — deploy first to use snapshots.` : snapData.error });
+            setSnapshots([]);
+          } else {
+            setSnapshots(snapData.snapshots || []);
+          }
+          setCanisterStatus(statusData.runningStatus || null);
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
+        }
+        setLoading(false);
+      }, [selectedCanister, projectPath, network]);
+
+      useEffect(() => {
+        if (selectedCanister && projectPath) fetchSnapshots();
+      }, [selectedCanister, projectPath, network]);
+
+      // Actions
+      const createSnapshot = async () => {
+        setActionLoading('create');
+        setMessage(null);
+        const data = await api.post('/api/canister/snapshot/create', {
+          path: projectPath, canister: selectedCanister, network,
+        });
+        if (data.ok) {
+          setMessage({ type: 'success', text: `Snapshot created${data.snapshotId ? ': ' + data.snapshotId : ''}` });
+          fetchSnapshots();
+        } else {
+          setMessage({ type: 'error', text: data.error || 'Failed to create snapshot' });
+        }
+        setActionLoading(null);
+      };
+
+      const loadSnapshot = async (snapshotId) => {
+        setActionLoading('load:' + snapshotId);
+        setMessage(null);
+        const data = await api.post('/api/canister/snapshot/load', {
+          path: projectPath, canister: selectedCanister, network, snapshotId,
+        });
+        if (data.ok) {
+          setMessage({ type: 'success', text: 'Snapshot restored successfully' });
+          fetchSnapshots();
+        } else {
+          setMessage({ type: 'error', text: data.output || 'Failed to load snapshot' });
+        }
+        setActionLoading(null);
+      };
+
+      const deleteSnapshot = async (snapshotId) => {
+        setActionLoading('delete:' + snapshotId);
+        setMessage(null);
+        const data = await api.post('/api/canister/snapshot/delete', {
+          path: projectPath, canister: selectedCanister, network, snapshotId,
+        });
+        if (data.ok) {
+          setMessage({ type: 'success', text: 'Snapshot deleted' });
+          fetchSnapshots();
+        } else {
+          setMessage({ type: 'error', text: data.output || 'Failed to delete snapshot' });
+        }
+        setActionLoading(null);
+      };
+
+      const downloadSnapshot = async (snapshotId) => {
+        if (!downloadDir) { setMessage({ type: 'error', text: 'Enter a directory path' }); return; }
+        setActionLoading('download:' + snapshotId);
+        setMessage({ type: 'info', text: 'Downloading snapshot... this may take a while for large canisters' });
+        const data = await api.post('/api/canister/snapshot/download', {
+          path: projectPath, canister: selectedCanister, network, snapshotId, dir: downloadDir,
+        });
+        if (data.ok) {
+          setMessage({ type: 'success', text: `Snapshot downloaded to ${downloadDir}` });
+          setShowDownloadInput(null);
+        } else {
+          setMessage({ type: 'error', text: data.error || 'Download failed' });
+        }
+        setActionLoading(null);
+      };
+
+      const uploadSnapshot = async () => {
+        if (!uploadDir) { setMessage({ type: 'error', text: 'Enter a directory path' }); return; }
+        setActionLoading('upload');
+        setMessage({ type: 'info', text: 'Uploading snapshot... this may take a while' });
+        const data = await api.post('/api/canister/snapshot/upload', {
+          path: projectPath, canister: selectedCanister, network, dir: uploadDir,
+        });
+        if (data.ok) {
+          setMessage({ type: 'success', text: `Snapshot uploaded${data.snapshotId ? ': ' + data.snapshotId : ''}` });
+          setShowUploadInput(false);
+          fetchSnapshots();
+        } else {
+          setMessage({ type: 'error', text: data.error || 'Upload failed' });
+        }
+        setActionLoading(null);
+      };
+
+      const fetchMetadata = async (name) => {
+        setMetadata(null);
+        const data = await api.post('/api/canister/metadata', {
+          path: projectPath, canister: selectedCanister, network, metadataName: name,
+        });
+        if (data.ok) {
+          setMetadata({ name, data: data.data });
+        } else {
+          setMetadata({ name, error: data.error });
+        }
+      };
+
+      const isStopped = canisterStatus === 'Stopped';
+      const isRunning = canisterStatus === 'Running';
+
+      if (!projectLoaded) {
+        return (
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl px-5 py-12 text-center text-gray-500">
+            <p>Load a project to manage snapshots</p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="space-y-5">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-white">Snapshots & Data</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Backup, restore, and extract canister data — {networkLabel}
+              </p>
+            </div>
+          </div>
+
+          {/* Canister selector + status */}
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="flex-1">
+              <label className="block text-xs text-gray-500 mb-1.5">Canister</label>
+              <select
+                value={selectedCanister}
+                onChange={(e) => { setSelectedCanister(e.target.value); setSnapshots([]); setMessage(null); setMetadata(null); }}
+                className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-icp-500 text-sm appearance-none cursor-pointer"
+              >
+                {canisters.map((c) => (
+                  <option key={c.name} value={c.name}>{c.name} ({c.type})</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-end gap-2">
+              {canisterStatus && (
+                <div className={`px-3 py-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                  isStopped ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                    : isRunning ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                    : 'bg-gray-500/10 text-gray-400 border border-gray-500/20'
+                }`}>
+                  <div className={`w-1.5 h-1.5 rounded-full ${isStopped ? 'bg-red-400' : isRunning ? 'bg-green-400' : 'bg-gray-400'}`} />
+                  {canisterStatus}
+                </div>
+              )}
+              <button onClick={fetchSnapshots} disabled={loading} className="px-4 py-3 bg-surface-800 border border-surface-700 rounded-xl text-sm text-gray-300 hover:bg-surface-700 transition-colors disabled:opacity-50">
+                {loading ? <SpinnerIcon className="w-4 h-4" /> : 'Refresh'}
+              </button>
+            </div>
+          </div>
+
+          {/* Stop/Start notice */}
+          {isRunning && (
+            <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl">
+              <svg className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+              </svg>
+              <div>
+                <p className="text-xs text-yellow-300 font-medium">Canister must be stopped to create or restore snapshots</p>
+                <p className="text-[11px] text-yellow-400/70 mt-0.5">Stop the canister from the Canisters tab, or it will be shown as an error during snapshot operations.</p>
+              </div>
+            </div>
+          )}
+
+          {/* Message banner */}
+          {message && (
+            <div className={`flex items-start gap-2 p-3 rounded-xl text-xs ${
+              message.type === 'success' ? 'bg-green-500/10 border border-green-500/20 text-green-300' :
+              message.type === 'error' ? 'bg-red-500/10 border border-red-500/20 text-red-300' :
+              message.type === 'warn' ? 'bg-yellow-500/10 border border-yellow-500/20 text-yellow-300' :
+              'bg-icp-500/10 border border-icp-500/20 text-icp-300'
+            }`}>
+              {message.type === 'info' && <SpinnerIcon className="w-3.5 h-3.5 shrink-0 mt-0.5" />}
+              <p className="break-all">{message.text}</p>
+              <button onClick={() => setMessage(null)} className="ml-auto text-gray-500 hover:text-white shrink-0">&times;</button>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            {/* Left: Snapshot actions */}
+            <div className="space-y-4">
+              {/* Create snapshot */}
+              <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                <h3 className="text-sm font-medium text-white mb-3">Create Snapshot</h3>
+                <p className="text-[11px] text-gray-500 mb-3">Saves canister WASM, heap, stable memory, and all data. Max 10 per canister.</p>
+                <button
+                  onClick={createSnapshot}
+                  disabled={!!actionLoading}
+                  className="w-full py-2.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-xl text-sm font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
+                >
+                  {actionLoading === 'create' ? <><SpinnerIcon className="w-4 h-4" /> Creating...</> : (
+                    <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM18.75 10.5h.008v.008h-.008V10.5Z" /></svg> Create Snapshot</>
+                  )}
+                </button>
+                <p className="text-[10px] text-gray-600 mt-2 text-center">{snapshots.length}/10 snapshots used</p>
+              </div>
+
+              {/* Upload snapshot */}
+              <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                <h3 className="text-sm font-medium text-white mb-3">Upload Snapshot</h3>
+                <p className="text-[11px] text-gray-500 mb-3">Restore from a previously downloaded snapshot directory.</p>
+                {showUploadInput ? (
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={uploadDir}
+                      onChange={(e) => setUploadDir(e.target.value)}
+                      placeholder="/path/to/snapshot/dir"
+                      className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-icp-500"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={uploadSnapshot}
+                        disabled={!uploadDir || !!actionLoading}
+                        className="flex-1 py-2 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-lg text-xs font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-1"
+                      >
+                        {actionLoading === 'upload' ? <><SpinnerIcon className="w-3 h-3" /> Uploading...</> : 'Upload'}
+                      </button>
+                      <button onClick={() => setShowUploadInput(false)} className="px-3 py-2 text-xs text-gray-500 hover:text-white">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowUploadInput(true)}
+                    disabled={!!actionLoading}
+                    className="w-full py-2.5 bg-surface-800 text-gray-300 border border-surface-700 rounded-xl text-sm font-medium hover:bg-surface-700 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+                    Upload from Directory
+                  </button>
+                )}
+              </div>
+
+              {/* Data extraction */}
+              <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                <h3 className="text-sm font-medium text-white mb-3">Extract Data</h3>
+                <p className="text-[11px] text-gray-500 mb-3">Read canister metadata like Candid interfaces.</p>
+                <div className="space-y-2">
+                  {['candid:service', 'candid:args', 'dfx'].map((name) => (
+                    <button
+                      key={name}
+                      onClick={() => fetchMetadata(name)}
+                      className="w-full py-2 bg-surface-800 text-gray-300 border border-surface-700 rounded-lg text-xs font-medium hover:bg-surface-700 transition-colors text-left px-3 font-mono"
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+                {metadata && (
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] text-gray-500 font-mono">{metadata.name}</span>
+                      <button onClick={() => setMetadata(null)} className="text-[11px] text-gray-600 hover:text-white">&times;</button>
+                    </div>
+                    {metadata.error ? (
+                      <p className="text-xs text-red-400">{metadata.error}</p>
+                    ) : (
+                      <pre className="text-[11px] text-gray-300 bg-surface-950 border border-surface-800 rounded-lg p-3 overflow-auto max-h-48 font-mono whitespace-pre-wrap">{metadata.data}</pre>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right: Snapshot list */}
+            <div className="lg:col-span-2">
+              <div className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                <div className="px-5 py-4 border-b border-surface-700 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">Snapshots</h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      {snapshots.length === 0 ? 'No snapshots yet' : `${snapshots.length} snapshot(s)`}
+                    </p>
+                  </div>
+                </div>
+
+                {loading ? (
+                  <div className="flex items-center justify-center py-12">
+                    <SpinnerIcon className="w-6 h-6 text-icp-400" />
+                  </div>
+                ) : snapshots.length === 0 ? (
+                  <div className="px-5 py-12 text-center">
+                    <svg className="w-10 h-10 text-gray-700 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" />
+                    </svg>
+                    <p className="text-sm text-gray-500">No snapshots for this canister</p>
+                    <p className="text-xs text-gray-600 mt-1">Create a snapshot to backup the canister state</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-surface-800">
+                    {snapshots.map((snap) => (
+                      <div key={snap.id} className="px-5 py-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-mono text-white truncate" title={snap.id}>{snap.id}</p>
+                            <div className="flex items-center gap-3 mt-1.5">
+                              {snap.takenAt && (
+                                <span className="text-[11px] text-gray-500 flex items-center gap-1">
+                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                                  {snap.takenAt}
+                                </span>
+                              )}
+                              {snap.size && (
+                                <span className="text-[11px] text-gray-500 flex items-center gap-1">
+                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" /></svg>
+                                  {snap.size}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {/* Restore */}
+                            <button
+                              onClick={() => setConfirmAction({ type: 'load', id: snap.id })}
+                              disabled={!!actionLoading}
+                              className="px-2.5 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-lg hover:bg-icp-500/20 disabled:opacity-40 transition-colors"
+                              title="Restore this snapshot"
+                            >
+                              {actionLoading === 'load:' + snap.id ? <SpinnerIcon className="w-3 h-3" /> : 'Restore'}
+                            </button>
+                            {/* Download */}
+                            <button
+                              onClick={() => { setShowDownloadInput(showDownloadInput === snap.id ? null : snap.id); setDownloadDir(projectPath ? projectPath + '/snapshots/' + snap.id.slice(0, 8) : ''); }}
+                              disabled={!!actionLoading}
+                              className="px-2.5 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:bg-surface-700 disabled:opacity-40 transition-colors"
+                              title="Download snapshot to local disk"
+                            >
+                              {actionLoading === 'download:' + snap.id ? <SpinnerIcon className="w-3 h-3" /> : 'Download'}
+                            </button>
+                            {/* Delete */}
+                            <button
+                              onClick={() => setConfirmAction({ type: 'delete', id: snap.id })}
+                              disabled={!!actionLoading}
+                              className="px-2.5 py-1.5 text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/20 disabled:opacity-40 transition-colors"
+                              title="Delete this snapshot"
+                            >
+                              {actionLoading === 'delete:' + snap.id ? <SpinnerIcon className="w-3 h-3" /> : 'Delete'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Download input */}
+                        {showDownloadInput === snap.id && (
+                          <div className="mt-3 flex gap-2">
+                            <input
+                              type="text"
+                              value={downloadDir}
+                              onChange={(e) => setDownloadDir(e.target.value)}
+                              placeholder="/path/to/download/dir"
+                              className="flex-1 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-white text-xs font-mono focus:outline-none focus:border-icp-500"
+                            />
+                            <button
+                              onClick={() => downloadSnapshot(snap.id)}
+                              disabled={!downloadDir || !!actionLoading}
+                              className="px-3 py-2 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-lg text-xs font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setShowDownloadInput(null)}
+                              className="px-2 py-2 text-xs text-gray-500 hover:text-white"
+                            >
+                              &times;
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Confirmation modal for snapshot actions */}
+          {confirmAction && (
+            <ConfirmModal
+              isOpen={true}
+              title={confirmAction.type === 'load'
+                ? `Restore snapshot?`
+                : `Delete snapshot?`}
+              message={confirmAction.type === 'load'
+                ? `This will replace the canister's current code and data with the snapshot. Any data added after the snapshot was taken will be lost. The canister must be stopped.`
+                : `This will permanently delete snapshot ${confirmAction.id.slice(0, 16)}... This cannot be undone.`}
+              danger={confirmAction.type === 'delete'}
+              onConfirm={() => {
+                const action = confirmAction;
+                setConfirmAction(null);
+                if (action.type === 'load') loadSnapshot(action.id);
+                else if (action.type === 'delete') deleteSnapshot(action.id);
+              }}
+              onCancel={() => setConfirmAction(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ---- Deploy Summary View ----
+    function DeploySummaryView({ summary, loading, network, projectLoaded }) {
+      if (!projectLoaded) {
+        return <p className="text-gray-600 text-sm">Load a project to see deployment summary.</p>;
+      }
+      if (loading) {
+        return (
+          <div className="flex items-center gap-2 text-gray-400 text-sm py-8 justify-center">
+            <SpinnerIcon className="w-5 h-5" /> Analyzing deployment status...
+          </div>
+        );
+      }
+      if (!summary) {
+        return <p className="text-gray-600 text-sm">Click Refresh to load deployment summary.</p>;
+      }
+      if (summary.error) {
+        return <p className="text-red-400 text-sm">{summary.error}</p>;
+      }
+
+      const { canisters = {}, git: rawGit } = summary;
+      const git = rawGit || {};
+      const canisterNames = Object.keys(canisters);
+      const summaryNetLabel = network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1);
+
+      return (
+        <div className="space-y-4 text-sm">
+          {/* Canister deployment status */}
+          <div>
+            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Canisters on {summaryNetLabel}</h4>
+            <div className="space-y-2">
+              {canisterNames.map((name) => {
+                const c = canisters[name];
+                const deployed = !!c.canisterId;
+                const hasLocalWasm = c.localWasmExists;
+                return (
+                  <div key={name} className="bg-surface-900 border border-surface-700 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-white font-medium">{name}</span>
+                      {deployed ? (
+                        <span className="text-[11px] bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full">Deployed</span>
+                      ) : (
+                        <span className="text-[11px] bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">Not Deployed</span>
+                      )}
+                    </div>
+                    {deployed && (
+                      <div className="text-xs text-gray-500 space-y-0.5">
+                        <div>ID: <span className="text-gray-400 font-mono">{c.canisterId}</span></div>
+                        {c.version ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-500">Version:</span>
+                            <span className="text-icp-400 font-mono">{c.version.gitCommit}</span>
+                            {c.version.gitBranch && <span className="text-gray-600">({c.version.gitBranch})</span>}
+                            {c.version.gitDirty && <span className="text-yellow-400 text-[10px]">dirty</span>}
+                            {c.version.timestamp && (
+                              <span className="text-gray-600">— {new Date(c.version.timestamp).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        ) : (
+                          c.moduleHash && c.moduleHash !== 'None' && <div>Module: <span className="text-gray-400 font-mono">{c.moduleHash.slice(0, 16)}...</span> <span className="text-gray-600">(no deploy history)</span></div>
+                        )}
+                        {c.status && <div>Status: <span className={c.status === 'Running' ? 'text-green-400' : 'text-yellow-400'}>{c.status}</span></div>}
+                      </div>
+                    )}
+                    {!deployed && hasLocalWasm && (
+                      <div className="text-xs text-gray-500">Local WASM ready — will be a fresh install</div>
+                    )}
+                    {!deployed && !hasLocalWasm && (
+                      <div className="text-xs text-gray-500">No local WASM — build required before deploy</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Git status */}
+          {Array.isArray(git.uncommittedChanges) && git.uncommittedChanges.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-yellow-400 uppercase tracking-wider mb-2">Uncommitted Changes</h4>
+              <div className="bg-surface-900 border border-yellow-500/20 rounded-lg p-3">
+                <pre className="text-xs text-yellow-300 whitespace-pre-wrap">{git.uncommittedChanges.join('\n')}</pre>
+              </div>
+            </div>
+          )}
+
+          {git.diffStat && (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Changes Since Last Deploy</h4>
+              <div className="bg-surface-900 border border-surface-700 rounded-lg p-3">
+                <pre className="text-xs text-gray-400 whitespace-pre-wrap">{git.diffStat}</pre>
+              </div>
+            </div>
+          )}
+
+          {Array.isArray(git.recentCommits) && git.recentCommits.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Recent Commits</h4>
+              <div className="bg-surface-900 border border-surface-700 rounded-lg p-3 space-y-1">
+                {git.recentCommits.map((commit, i) => (
+                  <div key={i} className="text-xs text-gray-400 truncate">{commit}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(!Array.isArray(git.recentCommits) || git.recentCommits.length === 0) && (!Array.isArray(git.uncommittedChanges) || git.uncommittedChanges.length === 0) && (
+            <div className="text-xs text-gray-600">No git repository detected in project folder.</div>
+          )}
+        </div>
+      );
+    }
+
+    // ---- Main App ----
+    function App() {
+      // State
+      const [projectPath, setProjectPath] = useState('');
+      const [network, setNetwork] = useState('local');
+      const [identities, setIdentities] = useState([]);
+      const [selectedIdentity, setSelectedIdentity] = useState('');
+      const [principal, setPrincipal] = useState('');
+      const [cliInfo, setCliInfo] = useState({ cli: 'dfx', version: '' });
+      const [canisters, setCanisters] = useState([]);
+      const [selectedCanisters, setSelectedCanisters] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [deployStatus, setDeployStatus] = useState('idle'); // idle, deploying, success, error, cancelled
+      const [deployMode, setDeployMode] = useState(''); // '' = auto, 'upgrade', 'reinstall', 'install'
+      const [projectLoaded, setProjectLoaded] = useState(false);
+      const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
+      const [replicaRunning, setReplicaRunning] = useState(false);
+      const [canisterStatuses, setCanisterStatuses] = useState({});
+      const [tab, setTab] = useState('deploy'); // deploy, canisters
+      const [loadingProject, setLoadingProject] = useState(false);
+      const [configType, setConfigType] = useState('');
+      const [confirmModal, setConfirmModal] = useState(null); // { title, message, danger, onConfirm }
+      const [reinstallModalOpen, setReinstallModalOpen] = useState(false);
+      const [availableNetworks, setAvailableNetworks] = useState(['local', 'ic']);
+      const [rightPanel, setRightPanel] = useState('summary'); // 'summary' | 'logs'
+      const [deploySummary, setDeploySummary] = useState(null);
+      const [summaryLoading, setSummaryLoading] = useState(false);
+
+      const wsRef = useRef(null);
+      const logEndRef = useRef(null);
+
+      // Auto-scroll logs
+      useEffect(() => {
+        logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, [logs]);
+
+      // Fetch principal when identity changes
+      const fetchPrincipal = useCallback(async () => {
+        try {
+          const data = await api.get('/api/identity/principal');
+          if (data.principal) setPrincipal(data.principal);
+        } catch { setPrincipal(''); }
+      }, []);
+
+      // Load identities + CLI info on mount
+      useEffect(() => {
+        api.get('/api/cli').then(setCliInfo).catch(() => {});
+
+        api.get('/api/identities').then((data) => {
+          if (Array.isArray(data)) {
+            setIdentities(data);
+            const active = data.find((i) => i.active);
+            if (active) setSelectedIdentity(active.name);
+          }
+        }).catch(() => {});
+
+        fetchPrincipal();
+
+        api.get('/api/dfx/status').then((data) => {
+          setReplicaRunning(data.running);
+        }).catch(() => {});
+      }, []);
+
+      // Check if a canister is remote/external for the given network
+      // remote.id.ic = "..." means it's external on mainnet but local on local
+      const isRemoteForNetwork = useCallback((canister, net) => {
+        if (canister.pullType) return true;
+        if (!canister.remote || !canister.remote.id) return false;
+        const networkKey = net === 'ic' ? 'ic' : 'local';
+        return !!canister.remote.id[networkKey];
+      }, []);
+
+      // Filter to only owned (non-remote) canisters for current network
+      const ownedCanisters = canisters.filter((c) => !isRemoteForNetwork(c, network));
+
+      // Human-readable network label
+      const networkLabel = network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1);
+
+      // Load project
+      const loadProject = useCallback(async (path) => {
+        if (!path) return;
+        setLoadingProject(true);
+        try {
+          const data = await api.post('/api/project/info', { path });
+          if (data.error) {
+            setLogs((prev) => [...prev, { type: 'error', text: data.error }]);
+            setProjectLoaded(false);
+          } else {
+            setCanisters(data.canisters);
+            setSelectedCanisters(data.canisters.filter((c) => !c.remote && !c.pullType).map((c) => c.name));
+            setProjectLoaded(true);
+            setConfigType(data.configType || 'dfx.json');
+            // Set available networks from project config
+            const nets = data.networks && data.networks.length > 0 ? data.networks : ['local', 'ic'];
+            if (!nets.includes('local')) nets.unshift('local');
+            setAvailableNetworks(nets);
+            setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'dfx.json'})` }]);
+            setLogs((prev) => [
+              ...prev,
+              { type: 'info', text: `Found ${data.canisters.length} canister(s): ${data.canisters.map((c) => c.name).join(', ')}` },
+            ]);
+            if (nets.length > 2) {
+              setLogs((prev) => [...prev, { type: 'info', text: `Networks: ${nets.map((n) => n === 'ic' ? 'Production (ic)' : n).join(', ')}` }]);
+            }
+          }
+        } catch (e) {
+          setLogs((prev) => [...prev, { type: 'error', text: e.message }]);
+        }
+        setLoadingProject(false);
+      }, []);
+
+      // Fetch deploy summary
+      const fetchDeploySummary = useCallback(async () => {
+        if (!projectPath || !projectLoaded) return;
+        setSummaryLoading(true);
+        try {
+          const data = await api.post('/api/deploy/summary', {
+            path: projectPath,
+            network,
+            canisterNames: ownedCanisters.map((c) => c.name),
+          });
+          setDeploySummary(data);
+        } catch (e) {
+          setDeploySummary({ error: e.message });
+        }
+        setSummaryLoading(false);
+      }, [projectPath, projectLoaded, network, canisters]);
+
+      // Auto-fetch summary when project loads or network changes
+      useEffect(() => {
+        if (projectLoaded && projectPath) {
+          fetchDeploySummary();
+        }
+      }, [projectLoaded, network]);
+
+      // Deploy (internal — called after confirmation)
+      const doDeployNow = useCallback(() => {
+        setDeployStatus('deploying');
+        setLogs([]);
+        setRightPanel('logs');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          ws.send(
+            JSON.stringify({
+              action: 'deploy',
+              path: projectPath,
+              network,
+              canisters: selectedCanisters.length === canisters.length ? [] : selectedCanisters,
+              identity: selectedIdentity,
+              mode: deployMode || undefined,
+            })
+          );
+        };
+
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'log') {
+            setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
+          } else if (msg.type === 'status') {
+            if (['success', 'error', 'cancelled'].includes(msg.data)) {
+              setDeployStatus(msg.data);
+              ws.close();
+            }
+          } else if (msg.type === 'error') {
+            setLogs((prev) => [...prev, { type: 'error', text: msg.data }]);
+          }
+        };
+
+        ws.onerror = () => {
+          setDeployStatus('error');
+          setLogs((prev) => [...prev, { type: 'error', text: 'WebSocket connection failed' }]);
+        };
+      }, [projectPath, network, selectedCanisters, selectedIdentity, canisters, deployMode]);
+
+      // Deploy with confirmation for mainnet / reinstall
+      const deploy = useCallback(() => {
+        if (!projectPath || deployStatus === 'deploying') return;
+
+        if (deployMode === 'reinstall') {
+          setReinstallModalOpen(true);
+          return;
+        }
+
+        if (network !== 'local') {
+          const netLabel = network === 'ic' ? 'PRODUCTION (mainnet)' : `"${network}" network`;
+          setConfirmModal({
+            title: `Deploy to ${network === 'ic' ? 'Production' : network}`,
+            message: `You are about to deploy ${selectedCanisters.length} canister(s) to ${netLabel}. This will consume real cycles. Continue?`,
+            danger: network === 'ic',
+            onConfirm: () => { setConfirmModal(null); doDeployNow(); },
+          });
+          return;
+        }
+
+        doDeployNow();
+      }, [projectPath, deployStatus, network, selectedCanisters, deployMode, doDeployNow]);
+
+      const cancelDeploy = useCallback(() => {
+        if (wsRef.current) {
+          wsRef.current.send(JSON.stringify({ action: 'cancel' }));
+        }
+      }, []);
+
+      const startReplica = useCallback(() => {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}`);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ action: 'start-replica', path: projectPath }));
+          setLogs((prev) => [...prev, { type: 'info', text: 'Starting local replica...' }]);
+        };
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'log') {
+            setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
+          } else if (msg.type === 'status') {
+            if (msg.data === 'replica-running') {
+              setReplicaRunning(true);
+              setLogs((prev) => [...prev, { type: 'info', text: 'Local replica is running' }]);
+            }
+          }
+        };
+      }, [projectPath]);
+
+      const [loadingStatuses, setLoadingStatuses] = useState(false);
+
+      const fetchCanisterStatus = useCallback(async (canisterName) => {
+        setCanisterStatuses((prev) => ({ ...prev, [canisterName]: { ...prev[canisterName], loading: true } }));
+        try {
+          const data = await api.post('/api/canister/status', {
+            path: projectPath,
+            canister: canisterName,
+            network,
+          });
+          setCanisterStatuses((prev) => ({ ...prev, [canisterName]: { ...data, loading: false } }));
+        } catch {
+          setCanisterStatuses((prev) => ({
+            ...prev,
+            [canisterName]: { error: 'Failed to fetch', loading: false },
+          }));
+        }
+      }, [projectPath, network]);
+
+      const fetchAllCanisterStatuses = useCallback(async () => {
+        if (!projectLoaded || canisters.length === 0) return;
+        setLoadingStatuses(true);
+        try {
+          const data = await api.post('/api/canisters/status-all', {
+            path: projectPath,
+            network,
+            canisterNames: ownedCanisters.map((c) => c.name),
+          });
+          setCanisterStatuses(data);
+        } catch {
+          // individual errors are in the response per-canister
+        }
+        setLoadingStatuses(false);
+      }, [projectPath, network, projectLoaded, canisters]);
+
+      // Auto-fetch statuses when switching to canisters tab or changing network
+      useEffect(() => {
+        if (tab === 'canisters' && projectLoaded && canisters.length > 0) {
+          setCanisterStatuses({});
+          fetchAllCanisterStatuses();
+        }
+      }, [tab, network]);
+
+      // Canister lifecycle actions
+      const canisterAction = useCallback(async (action, canisterName) => {
+        setCanisterStatuses((prev) => ({ ...prev, [canisterName]: { ...prev[canisterName], loading: true } }));
+        try {
+          await api.post(`/api/canister/${action}`, {
+            path: projectPath,
+            canister: canisterName,
+            network,
+          });
+          // Re-fetch status after action
+          await fetchCanisterStatus(canisterName);
+        } catch (e) {
+          setCanisterStatuses((prev) => ({
+            ...prev,
+            [canisterName]: { ...prev[canisterName], error: e.message, loading: false },
+          }));
+        }
+      }, [projectPath, network, fetchCanisterStatus]);
+
+      const stopCanister = useCallback((name) => {
+        setConfirmModal({
+          title: `Stop canister "${name}"?`,
+          message: 'The canister will stop processing requests. You can restart it later.',
+          danger: false,
+          onConfirm: () => { setConfirmModal(null); canisterAction('stop', name); },
+        });
+      }, [canisterAction]);
+
+      const startCanister = useCallback((name) => canisterAction('start', name), [canisterAction]);
+
+      const deleteCanister = useCallback((name) => {
+        setConfirmModal({
+          title: `DELETE canister "${name}"?`,
+          message: 'This will permanently delete the canister and all its data. This cannot be undone.',
+          danger: true,
+          onConfirm: () => { setConfirmModal(null); canisterAction('delete', name); },
+        });
+      }, [canisterAction]);
+
+      const toggleCanister = (name) => {
+        setSelectedCanisters((prev) =>
+          prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name]
+        );
+      };
+
+      const statusColor = {
+        idle: 'bg-gray-600',
+        deploying: 'bg-yellow-500',
+        success: 'bg-green-500',
+        error: 'bg-red-500',
+        cancelled: 'bg-orange-500',
+      };
+
+      return (
+        <div className="min-h-screen text-white">
+          {/* Header */}
+          <header className="border-b border-surface-700 bg-surface-900/80 backdrop-blur-sm sticky top-0 z-40">
+            <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-icp-500 to-icp-700 flex items-center justify-center">
+                  <RocketIcon className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h1 className="text-lg font-bold text-white tracking-tight">ICP Deploy</h1>
+                  <p className="text-xs text-gray-500">Dashboard</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[11px] text-gray-600 font-mono">{cliInfo.version?.split('\n')[0] || cliInfo.cli}</span>
+                {principal && (
+                  <span className="text-[11px] text-gray-500 font-mono max-w-[140px] truncate" title={principal}>
+                    {principal.slice(0, 8)}...{principal.slice(-5)}
+                  </span>
+                )}
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${replicaRunning ? 'bg-green-400' : 'bg-gray-600'}`} />
+                  <span className="text-xs text-gray-400">
+                    Replica {replicaRunning ? 'running' : 'stopped'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${statusColor[deployStatus]}`} />
+                  <span className="text-xs text-gray-400 capitalize">{deployStatus}</span>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-6xl mx-auto px-6 py-6">
+            {/* Project Selector */}
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-300 mb-2">Project Folder</label>
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <input
+                    type="text"
+                    value={projectPath}
+                    onChange={(e) => {
+                      setProjectPath(e.target.value);
+                      setProjectLoaded(false);
+                    }}
+                    onBlur={() => projectPath && loadProject(projectPath)}
+                    onKeyDown={(e) => e.key === 'Enter' && loadProject(projectPath)}
+                    placeholder="/path/to/your/icp-project"
+                    className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-icp-500 focus:ring-1 focus:ring-icp-500/50 font-mono text-sm"
+                  />
+                  {projectLoaded && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                      <svg className="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                      </svg>
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => setFolderBrowserOpen(true)}
+                  className="px-4 py-3 bg-surface-800 border border-surface-700 rounded-xl hover:bg-surface-700 transition-colors"
+                  title="Browse folders"
+                >
+                  <FolderIcon className="w-5 h-5 text-gray-400" />
+                </button>
+                <button
+                  onClick={() => loadProject(projectPath)}
+                  disabled={!projectPath || loadingProject}
+                  className="px-5 py-3 bg-surface-800 border border-surface-700 rounded-xl hover:bg-surface-700 transition-colors text-sm font-medium text-gray-300 disabled:opacity-40"
+                >
+                  {loadingProject ? <SpinnerIcon className="w-4 h-4" /> : 'Load'}
+                </button>
+              </div>
+            </div>
+
+            {/* Tabs + Network Toggle */}
+            <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+              <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700 w-fit">
+                {['deploy', 'canisters', 'snapshots'].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTab(t)}
+                    className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+                      tab === t
+                        ? 'bg-icp-500 text-white shadow-lg shadow-icp-500/20'
+                        : 'text-gray-400 hover:text-white hover:bg-surface-800'
+                    }`}
+                  >
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {/* Global network selector */}
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700">
+                  {availableNetworks.map((n) => {
+                    const label = n === 'local' ? 'Local' : n === 'ic' ? 'Production' : n.charAt(0).toUpperCase() + n.slice(1);
+                    const isCustom = n !== 'local' && n !== 'ic';
+                    const activeStyle = n === 'ic'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/20'
+                      : n === 'local'
+                      ? 'bg-gradient-to-r from-icp-500 to-icp-600 text-white shadow-lg shadow-icp-500/20'
+                      : 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white shadow-lg shadow-yellow-500/20';
+                    return (
+                      <div key={n} className="relative group">
+                        <button
+                          onClick={() => setNetwork(n)}
+                          className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                            network === n ? activeStyle : 'text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                        {isCustom && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmModal({
+                                title: `Remove "${label}" network?`,
+                                message: `This will remove the "${n}" network from dfx.json. Any canisters deployed to this network will still exist on-chain but won't be managed from this project anymore. This does NOT delete the canisters themselves.`,
+                                danger: true,
+                                onConfirm: () => {
+                                  setConfirmModal(null);
+                                  api.post('/api/project/network', { path: projectPath, action: 'remove', name: n }).then((data) => {
+                                    if (data.ok) {
+                                      setAvailableNetworks(data.networks);
+                                      if (network === n) setNetwork('local');
+                                      setLogs((prev) => [...prev, { type: 'info', text: `Removed network "${n}" from dfx.json` }]);
+                                    } else {
+                                      alert(data.error || 'Failed to remove network');
+                                    }
+                                  }).catch((e) => alert(e.message));
+                                },
+                              });
+                            }}
+                            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/80 text-white text-[9px] font-bold items-center justify-center hidden group-hover:flex hover:bg-red-500 transition-colors"
+                            title={`Remove "${label}" network`}
+                          >
+                            &times;
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {projectLoaded && (
+                  <button
+                    onClick={() => {
+                      const name = prompt('Enter network name (e.g. "staging"):');
+                      if (!name || !name.trim()) return;
+                      const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+                      if (!cleanName) { alert('Invalid name — use letters, numbers, hyphens, underscores'); return; }
+                      if (availableNetworks.includes(cleanName)) { alert(`Network "${cleanName}" already exists`); return; }
+                      api.post('/api/project/network', { path: projectPath, action: 'add', name: cleanName }).then((data) => {
+                        if (data.ok) {
+                          setAvailableNetworks(data.networks);
+                          setNetwork(cleanName);
+                          setLogs((prev) => [...prev, { type: 'info', text: `Added network "${cleanName}" to dfx.json` }]);
+                        } else {
+                          alert(data.error || 'Failed to add network');
+                        }
+                      }).catch((e) => alert(e.message));
+                    }}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg bg-surface-900 border border-surface-700 text-gray-500 hover:text-white hover:border-icp-500/50 transition-colors"
+                    title="Add a network profile (e.g. staging)"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Non-local network warning — shown on deploy tab */}
+            {network !== 'local' && tab === 'deploy' && (
+              <div className={`mb-4 flex items-start gap-2 p-3 rounded-xl ${
+                network === 'ic'
+                  ? 'bg-orange-500/10 border border-orange-500/20'
+                  : 'bg-yellow-500/10 border border-yellow-500/20'
+              }`}>
+                <svg className={`w-4 h-4 mt-0.5 shrink-0 ${network === 'ic' ? 'text-orange-400' : 'text-yellow-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                </svg>
+                <p className={`text-xs ${network === 'ic' ? 'text-orange-300' : 'text-yellow-300'}`}>
+                  {network === 'ic'
+                    ? 'Deploying to PRODUCTION uses real cycles. Make sure your identity has sufficient balance.'
+                    : `Deploying to "${network}" network. This uses real cycles on mainnet infrastructure.`}
+                </p>
+              </div>
+            )}
+
+            {tab === 'deploy' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Left: Controls */}
+                <div className="space-y-5">
+                  {/* Identity */}
+                  <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                    <label className="block text-sm font-medium text-gray-300 mb-3">Identity</label>
+                    <select
+                      value={selectedIdentity}
+                      onChange={(e) => { setSelectedIdentity(e.target.value); fetchPrincipal(); }}
+                      className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-icp-500 text-sm appearance-none cursor-pointer"
+                    >
+                      {identities.map((id) => (
+                        <option key={id.name} value={id.name}>
+                          {id.name} {id.active ? '(current)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {principal && (
+                      <p className="mt-2 text-[11px] text-gray-500 font-mono truncate" title={principal}>
+                        {principal}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Deploy Mode */}
+                  <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                    <label className="block text-sm font-medium text-gray-300 mb-3">Deploy Mode</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { value: '', label: 'Auto', desc: 'Install new, upgrade existing' },
+                        { value: 'upgrade', label: 'Upgrade', desc: 'Preserve canister state' },
+                        { value: 'reinstall', label: 'Reinstall', desc: 'Wipes all state' },
+                        { value: 'install', label: 'Install', desc: 'New canisters only' },
+                      ].map((m) => (
+                        <button
+                          key={m.value}
+                          onClick={() => setDeployMode(m.value)}
+                          className={`p-2.5 rounded-xl text-left transition-all ${
+                            deployMode === m.value
+                              ? m.value === 'reinstall'
+                                ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+                                : 'bg-icp-500/10 border border-icp-500/20 text-white'
+                              : 'bg-surface-800 border border-transparent text-gray-400 hover:border-surface-700'
+                          }`}
+                        >
+                          <span className="text-xs font-medium block">{m.label}</span>
+                          <span className="text-[10px] text-gray-500 block mt-0.5">{m.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {deployMode === 'reinstall' && (
+                      <div className="mt-2 flex items-start gap-2 p-2.5 bg-red-500/10 border border-red-500/20 rounded-xl">
+                        <svg className="w-3.5 h-3.5 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                        </svg>
+                        <p className="text-[11px] text-red-300">Reinstall erases all canister data permanently!</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Canisters */}
+                  <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <label className="text-sm font-medium text-gray-300">Canisters</label>
+                      {ownedCanisters.length > 0 && (
+                        <button
+                          onClick={() =>
+                            setSelectedCanisters(
+                              selectedCanisters.length === ownedCanisters.length
+                                ? []
+                                : ownedCanisters.map((c) => c.name)
+                            )
+                          }
+                          className="text-xs text-icp-400 hover:text-icp-300"
+                        >
+                          {selectedCanisters.length === ownedCanisters.length ? 'Deselect all' : 'Select all'}
+                        </button>
+                      )}
+                    </div>
+                    {canisters.length === 0 ? (
+                      <p className="text-sm text-gray-500">Load a project to see canisters</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {ownedCanisters.map((c) => (
+                          <label
+                            key={c.name}
+                            className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-colors ${
+                              selectedCanisters.includes(c.name)
+                                ? 'bg-icp-500/10 border border-icp-500/20'
+                                : 'bg-surface-800 border border-transparent hover:border-surface-700'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedCanisters.includes(c.name)}
+                              onChange={() => toggleCanister(c.name)}
+                              className="rounded border-surface-700 bg-surface-800 text-icp-500 focus:ring-icp-500"
+                            />
+                            <div className="flex-1">
+                              <span className="text-sm font-medium text-white">{c.name}</span>
+                              <span className="text-xs text-gray-500 ml-2">{c.type}</span>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Local replica controls */}
+                  {network === 'local' && (
+                    <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
+                      <label className="block text-sm font-medium text-gray-300 mb-3">Local Replica</label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={startReplica}
+                          disabled={replicaRunning}
+                          className="flex-1 py-2.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-xl text-sm font-medium hover:bg-green-500/20 disabled:opacity-40 transition-colors"
+                        >
+                          Start
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await api.post('/api/dfx/stop');
+                            setReplicaRunning(false);
+                            setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]);
+                          }}
+                          disabled={!replicaRunning}
+                          className="flex-1 py-2.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded-xl text-sm font-medium hover:bg-red-500/20 disabled:opacity-40 transition-colors"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Deploy Button */}
+                  <button
+                    onClick={deployStatus === 'deploying' ? cancelDeploy : deploy}
+                    disabled={!projectLoaded || selectedCanisters.length === 0}
+                    className={`w-full py-4 rounded-2xl text-white font-bold text-base transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                      deployStatus === 'deploying'
+                        ? 'bg-red-500 hover:bg-red-600 deploying'
+                        : network === 'ic'
+                        ? 'bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 shadow-lg shadow-orange-500/20'
+                        : 'bg-gradient-to-r from-icp-500 to-icp-600 hover:from-icp-600 hover:to-icp-700 shadow-lg shadow-icp-500/20'
+                    }`}
+                  >
+                    {deployStatus === 'deploying' ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <SpinnerIcon className="w-5 h-5" />
+                        Cancel Deploy
+                      </span>
+                    ) : (
+                      <span className="flex items-center justify-center gap-2">
+                        <RocketIcon className="w-5 h-5" />
+                        Deploy to {network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1)}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {/* Right: Summary + Logs */}
+                <div className="lg:col-span-2">
+                  <div className="bg-surface-950 border border-surface-700 rounded-2xl overflow-hidden h-full flex flex-col">
+                    <div className="px-4 py-3 border-b border-surface-700 flex items-center justify-between bg-surface-900">
+                      <div className="flex items-center gap-2">
+                        <div className="flex gap-1.5">
+                          <div className="w-3 h-3 rounded-full bg-red-500/60" />
+                          <div className="w-3 h-3 rounded-full bg-yellow-500/60" />
+                          <div className="w-3 h-3 rounded-full bg-green-500/60" />
+                        </div>
+                        <div className="flex gap-1 ml-2">
+                          <button onClick={() => setRightPanel('summary')} className={`text-xs px-2 py-0.5 rounded ${rightPanel === 'summary' ? 'bg-surface-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>Summary</button>
+                          <button onClick={() => setRightPanel('logs')} className={`text-xs px-2 py-0.5 rounded ${rightPanel === 'logs' ? 'bg-surface-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                            Logs {logs.length > 0 && <span className="ml-1 text-[10px] bg-icp-500/30 text-icp-300 px-1.5 py-0 rounded-full">{logs.length}</span>}
+                          </button>
+                        </div>
+                      </div>
+                      {rightPanel === 'logs' && (
+                        <button onClick={() => setLogs([])} className="text-xs text-gray-500 hover:text-gray-300">Clear</button>
+                      )}
+                      {rightPanel === 'summary' && projectLoaded && (
+                        <button onClick={fetchDeploySummary} disabled={summaryLoading} className="text-xs text-icp-400 hover:text-icp-300 flex items-center gap-1">
+                          {summaryLoading ? <SpinnerIcon className="w-3 h-3" /> : <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" /></svg>}
+                          Refresh
+                        </button>
+                      )}
+                    </div>
+                    <div className="log-container flex-1 p-4 overflow-y-auto min-h-[500px] max-h-[700px]">
+                      {rightPanel === 'logs' ? (
+                        <>
+                          {logs.length === 0 ? (
+                            <p className="text-gray-600 text-sm">Deploy output will appear here...</p>
+                          ) : (
+                            logs.map((log, i) => (
+                              <div key={i} className={`whitespace-pre-wrap mb-0.5 leading-relaxed ${log.type === 'error' ? 'text-red-400' : log.type === 'info' ? 'text-icp-400' : 'text-gray-300'}`}>{log.text}</div>
+                            ))
+                          )}
+                          <div ref={logEndRef} />
+                        </>
+                      ) : (
+                        <DeploySummaryView summary={deploySummary} loading={summaryLoading} network={network} projectLoaded={projectLoaded} />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'canisters' && (
+              <div className="space-y-4">
+                {/* Header bar */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-base font-semibold text-white">Canister Status</h2>
+                    <p className="text-sm text-gray-500 mt-0.5">
+                      {projectLoaded
+                        ? `${canisters.length} canister(s) — ${networkLabel}`
+                        : 'Load a project to view canisters'}
+                    </p>
+                  </div>
+                  {projectLoaded && canisters.length > 0 && (
+                    <button
+                      onClick={fetchAllCanisterStatuses}
+                      disabled={loadingStatuses}
+                      className="flex items-center gap-2 px-4 py-2 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-xl text-sm font-medium hover:bg-icp-500/20 disabled:opacity-50 transition-colors"
+                    >
+                      {loadingStatuses ? (
+                        <><SpinnerIcon className="w-4 h-4" /> Fetching...</>
+                      ) : (
+                        <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" /></svg> Refresh All</>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {/* Network indicator */}
+                <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm ${
+                  network === 'ic'
+                    ? 'bg-orange-500/10 border border-orange-500/20 text-orange-300'
+                    : 'bg-icp-500/10 border border-icp-500/20 text-icp-300'
+                }`}>
+                  <div className={`w-2 h-2 rounded-full ${network === 'ic' ? 'bg-orange-400' : 'bg-icp-400'}`} />
+                  Showing {networkLabel.toLowerCase()} canister status
+                </div>
+
+                {/* Canister cards */}
+                {canisters.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {canisters.map((c) => {
+                      // Check if canister is remote/external on the current network
+                      const isRemote = isRemoteForNetwork(c, network);
+                      const remoteId = c.remote?.id?.ic || c.remote?.id?.local || null;
+
+                      if (isRemote) {
+                        return (
+                          <div key={c.name} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden opacity-60">
+                            <div className="px-5 py-4">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-base font-semibold text-white">{c.name}</span>
+                                <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                                  c.type === 'custom' ? 'bg-amber-500/20 text-amber-300' :
+                                  c.type === 'pull' ? 'bg-gray-500/20 text-gray-300' :
+                                  'bg-gray-500/20 text-gray-300'
+                                }`}>{c.type}</span>
+                                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-surface-700 text-gray-400">External</span>
+                              </div>
+                              {remoteId && <p className="text-xs text-gray-500 font-mono mt-1">{remoteId}</p>}
+                              <p className="text-xs text-gray-600 mt-2">This canister is an external dependency — not controlled by your identity.</p>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      const s = canisterStatuses[c.name];
+                      const hasData = s && !s.error && !s.loading;
+                      const isRunning = s?.runningStatus === 'Running';
+                      const isStopped = s?.runningStatus === 'Stopped';
+                      const cycles = hasData && s.cycles ? BigInt(s.cycles) : null;
+
+                      const formatCycles = (c) => {
+                        if (!c) return '—';
+                        const n = Number(c);
+                        if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+                        if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+                        if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+                        return n.toLocaleString();
+                      };
+
+                      const getCyclesHealth = (c) => {
+                        if (!c) return 'unknown';
+                        const n = Number(c);
+                        if (n >= 1e12) return 'great';
+                        if (n >= 1e11) return 'good';
+                        if (n >= 1e10) return 'low';
+                        return 'critical';
+                      };
+
+                      const health = getCyclesHealth(cycles);
+                      const healthColors = { great: 'text-green-400', good: 'text-blue-400', low: 'text-yellow-400', critical: 'text-red-400', unknown: 'text-gray-500' };
+                      const healthBarColors = { great: 'bg-green-400', good: 'bg-blue-400', low: 'bg-yellow-400', critical: 'bg-red-400', unknown: 'bg-gray-600' };
+                      const healthBarWidth = { great: 'w-full', good: 'w-3/4', low: 'w-1/3', critical: 'w-[10%]', unknown: 'w-0' };
+
+                      // Freezing threshold check (default 30 days = 2,592,000 seconds)
+                      const freezeThreshold = hasData && s.freezingThreshold ? Number(s.freezingThreshold) : null;
+                      const freezeDays = freezeThreshold ? (freezeThreshold / 86400).toFixed(0) : null;
+                      const freezeWarning = freezeThreshold !== null && freezeThreshold < 7776000; // < 90 days
+
+                      // Controller warnings
+                      const controllers = hasData && s.controllers ? s.controllers : [];
+                      const singleController = controllers.length === 1;
+
+                      return (
+                        <div key={c.name} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                          {/* Card header */}
+                          <div className="px-5 py-4 flex items-start justify-between">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-base font-semibold text-white">{c.name}</span>
+                                <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                                  c.type === 'motoko' ? 'bg-purple-500/20 text-purple-300' :
+                                  c.type === 'rust' ? 'bg-orange-500/20 text-orange-300' :
+                                  c.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
+                                  c.type === 'custom' ? 'bg-amber-500/20 text-amber-300' :
+                                  'bg-gray-500/20 text-gray-300'
+                                }`}>{c.type}</span>
+                              </div>
+                              {s?.canisterId && (
+                                <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={s.canisterId}>{s.canisterId}</p>
+                              )}
+                              {!s?.canisterId && hasData && (
+                                <p className="text-xs text-gray-600 mt-1">No canister ID</p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {hasData && (
+                                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ${
+                                  isRunning ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                                    : isStopped ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                                    : 'bg-gray-500/10 text-gray-400 border border-gray-500/20'
+                                }`}>
+                                  <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-green-400' : isStopped ? 'bg-red-400' : 'bg-gray-400'}`} />
+                                  {s.runningStatus}
+                                </div>
+                              )}
+                              {s?.loading && <SpinnerIcon className="w-4 h-4 text-gray-500" />}
+                            </div>
+                          </div>
+
+                          {/* Cycles section */}
+                          <div className="px-5 pb-4">
+                            {hasData && cycles !== null ? (
+                              <div>
+                                <div className="flex items-baseline justify-between mb-2">
+                                  <span className="text-xs text-gray-500">Cycles Balance</span>
+                                  <span className={`text-lg font-bold ${healthColors[health]}`}>{formatCycles(cycles)}</span>
+                                </div>
+                                <div className="h-2 bg-surface-800 rounded-full overflow-hidden">
+                                  <div className={`h-full rounded-full transition-all duration-500 ${healthBarColors[health]} ${healthBarWidth[health]}`} />
+                                </div>
+                                <div className="flex items-center justify-between mt-1.5">
+                                  <span className={`text-[11px] ${healthColors[health]}`}>
+                                    {health === 'great' ? 'Healthy' : health === 'good' ? 'Good' : health === 'low' ? 'Running low — top up soon' : 'Critical — canister may freeze!'}
+                                  </span>
+                                  <span className="text-[11px] text-gray-600">{Number(cycles).toLocaleString()} cycles</span>
+                                </div>
+                              </div>
+                            ) : s?.error ? (
+                              s.error.includes('Cannot find canister id') ? (
+                                <div className="flex items-center gap-2 p-3 bg-surface-800 border border-surface-700 rounded-xl">
+                                  <svg className="w-4 h-4 text-gray-500 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
+                                  </svg>
+                                  <p className="text-xs text-gray-500">Not deployed on {network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network}</p>
+                                </div>
+                              ) : (
+                                <div className="flex items-start gap-2 p-3 bg-red-500/5 border border-red-500/10 rounded-xl">
+                                  <svg className="w-4 h-4 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+                                  </svg>
+                                  <p className="text-xs text-red-300 break-all">{s.error.length > 120 ? s.error.slice(0, 120) + '...' : s.error}</p>
+                                </div>
+                              )
+                            ) : !s ? (
+                              <button onClick={() => fetchCanisterStatus(c.name)} className="w-full py-2.5 text-xs bg-surface-800 text-gray-400 rounded-xl hover:bg-surface-700 border border-surface-700 transition-colors">Load status</button>
+                            ) : null}
+                          </div>
+
+                          {/* Warnings */}
+                          {hasData && (health === 'critical' || singleController || freezeWarning) && (
+                            <div className="px-5 pb-3 space-y-1.5">
+                              {health === 'critical' && (
+                                <div className="flex items-center gap-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+                                  <svg className="w-3.5 h-3.5 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                                  <span className="text-[11px] text-red-300">Canister will freeze and become inaccessible if cycles reach zero</span>
+                                </div>
+                              )}
+                              {singleController && network === 'ic' && (
+                                <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                                  <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                                  <span className="text-[11px] text-yellow-300">Single controller — add a backup to prevent lockout</span>
+                                </div>
+                              )}
+                              {freezeWarning && network === 'ic' && (
+                                <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                                  <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                                  <span className="text-[11px] text-yellow-300">Freezing threshold is {freezeDays} days — recommended 90+ for production</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Extra info footer */}
+                          {hasData && (
+                            <div className="px-5 py-3 border-t border-surface-800 bg-surface-950/50">
+                              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                                {s.memoryBytes && (
+                                  <span className="text-[11px] text-gray-500">Memory: {(Number(s.memoryBytes) / (1024 * 1024)).toFixed(1)} MB</span>
+                                )}
+                                {freezeDays && (
+                                  <span className="text-[11px] text-gray-500">Freeze threshold: {freezeDays}d</span>
+                                )}
+                                {s.version ? (
+                                  <span className="text-[11px] text-icp-400 font-mono" title={s.moduleHash}>
+                                    {s.version.gitCommit}{s.version.gitBranch ? ` (${s.version.gitBranch})` : ''}{s.version.gitDirty ? ' *dirty*' : ''}
+                                    {s.version.timestamp ? ` — ${new Date(s.version.timestamp).toLocaleDateString()}` : ''}
+                                  </span>
+                                ) : s.moduleHash && s.moduleHash !== 'None' ? (
+                                  <span className="text-[11px] text-gray-500 font-mono truncate" title={s.moduleHash}>Module: {s.moduleHash.slice(0, 14)}...</span>
+                                ) : s.moduleHash === 'None' ? (
+                                  <span className="text-[11px] text-gray-600">No module installed</span>
+                                ) : null}
+                                {c.dependencies && c.dependencies.length > 0 && (
+                                  <span className="text-[11px] text-gray-500">Deps: {c.dependencies.join(', ')}</span>
+                                )}
+                              </div>
+                              {controllers.length > 0 && (
+                                <div className="mt-2">
+                                  <span className="text-[11px] text-gray-600">Controllers: </span>
+                                  {controllers.map((ctrl, i) => (
+                                    <span key={i} className="text-[11px] text-gray-500 font-mono" title={ctrl}>
+                                      {ctrl.length > 20 ? ctrl.slice(0, 8) + '...' + ctrl.slice(-5) : ctrl}{i < controllers.length - 1 ? ', ' : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {/* Lifecycle actions */}
+                              <div className="flex gap-2 mt-3">
+                                {isRunning && (
+                                  <button onClick={() => stopCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 rounded-lg hover:bg-yellow-500/20 transition-colors">Stop</button>
+                                )}
+                                {isStopped && (
+                                  <>
+                                    <button onClick={() => startCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg hover:bg-green-500/20 transition-colors">Start</button>
+                                    <button onClick={() => deleteCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors">Delete</button>
+                                  </>
+                                )}
+                                <button onClick={() => fetchCanisterStatus(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:bg-surface-700 transition-colors ml-auto">Refresh</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="bg-surface-900 border border-surface-700 rounded-2xl px-5 py-12 text-center text-gray-500">
+                    <p>Load a project to view canisters</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tab === 'snapshots' && (
+              <SnapshotsTab
+                projectPath={projectPath}
+                projectLoaded={projectLoaded}
+                network={network}
+                canisters={canisters}
+              />
+            )}
+          </main>
+
+          <FolderBrowser
+            isOpen={folderBrowserOpen}
+            onClose={() => setFolderBrowserOpen(false)}
+            onSelect={(path) => {
+              setProjectPath(path);
+              loadProject(path);
+            }}
+          />
+
+          <ConfirmModal
+            isOpen={!!confirmModal}
+            title={confirmModal?.title || ''}
+            message={confirmModal?.message || ''}
+            danger={confirmModal?.danger || false}
+            onConfirm={confirmModal?.onConfirm || (() => {})}
+            onCancel={() => setConfirmModal(null)}
+          />
+
+          <ReinstallConfirmModal
+            isOpen={reinstallModalOpen}
+            canisterCount={selectedCanisters.length}
+            network={network}
+            onConfirm={() => { setReinstallModalOpen(false); doDeployNow(); }}
+            onCancel={() => setReinstallModalOpen(false)}
+          />
+        </div>
+      );
+    }
+
+    // Error boundary so the app doesn't go completely blank on errors
+    class ErrorBoundary extends React.Component {
+      constructor(props) { super(props); this.state = { error: null }; }
+      static getDerivedStateFromError(error) { return { error }; }
+      render() {
+        if (this.state.error) {
+          return React.createElement('div', { style: { padding: 40, color: '#fff', background: '#0f172a', minHeight: '100vh' } },
+            React.createElement('h1', { style: { color: '#f87171', marginBottom: 16 } }, 'Something went wrong'),
+            React.createElement('pre', { style: { color: '#fca5a5', fontSize: 14, whiteSpace: 'pre-wrap' } }, this.state.error.toString()),
+            React.createElement('button', { onClick: () => this.setState({ error: null }), style: { marginTop: 16, padding: '8px 16px', background: '#3b5bdb', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer' } }, 'Try again')
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(
+      React.createElement(ErrorBoundary, null, React.createElement(App))
+    );
+  </script>
+</body>
+</html>
