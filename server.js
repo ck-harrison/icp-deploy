@@ -25,22 +25,22 @@ function assertSafeName(name, label = 'name') {
 }
 
 // Detect whether 'icp' or 'dfx' CLI is available
-// Prefer dfx if available (more mature), fall back to icp CLI
+// Prefer icp CLI (modern replacement), fall back to legacy dfx
 function detectCli() {
-  // Try dfx first — it's the established tool and what most projects use
-  const dfxResult = spawnSync('dfx', ['--version'], { encoding: 'utf-8', timeout: 5000 });
-  if (dfxResult.status === 0 && (dfxResult.stdout || '').toLowerCase().includes('dfx')) {
-    return 'dfx';
-  }
-  // Try icp CLI — verify output actually looks like the ICP CLI
+  // Try icp CLI first — it's the official modern tool
   const icpResult = spawnSync('icp', ['--version'], { encoding: 'utf-8', timeout: 5000 });
   if (icpResult.status === 0 && (icpResult.stdout || '').toLowerCase().includes('icp')) {
     return 'icp';
   }
-  // Fall back: if dfx at least ran (even without expected output), use it
-  if (dfxResult.error === undefined) return 'dfx';
+  // Fall back to legacy dfx
+  const dfxResult = spawnSync('dfx', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+  if (dfxResult.status === 0 && (dfxResult.stdout || '').toLowerCase().includes('dfx')) {
+    return 'dfx';
+  }
+  // Last resort fallbacks
   if (icpResult.error === undefined) return 'icp';
-  return 'dfx'; // last resort
+  if (dfxResult.error === undefined) return 'dfx';
+  return 'icp'; // default to modern CLI
 }
 
 const CLI = detectCli();
@@ -152,24 +152,38 @@ app.get('/api/cli', (_req, res) => {
 
 // List identities
 app.get('/api/identities', (_req, res) => {
-  // icp CLI: identity list and identity whoami work the same as dfx
-  const currentResult = runCliSync(['identity', 'whoami']);
+  // icp CLI: 'identity default' (no arg) returns current identity name
+  // dfx: 'identity whoami' returns current identity name
+  const whoamiCmd = CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami'];
+  const currentResult = runCliSync(whoamiCmd);
   const currentIdentity = currentResult.ok ? currentResult.data : '';
 
   const result = runCliSync(['identity', 'list']);
   if (!result.ok) return res.status(500).json({ error: result.data });
 
-  const lines = result.data.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = result.data.split('\n').filter((l) => l.trim());
   const identities = lines.map((line) => {
-    const name = line.replace(/\s*\*$/, '');
-    return { name, active: name === currentIdentity };
+    if (CLI === 'icp') {
+      // icp format: "  name   principal" or "* name   principal"
+      const isActive = line.startsWith('*');
+      const parts = line.replace(/^\*?\s+/, '').split(/\s+/);
+      const name = parts[0];
+      return { name, active: isActive };
+    } else {
+      // dfx format: "name" or "name *" for active
+      const isActive = line.includes('*');
+      const name = line.replace(/\s*\*/, '').trim();
+      return { name, active: isActive || name === currentIdentity };
+    }
   });
   res.json(identities);
 });
 
 // Get current identity
 app.get('/api/identity/current', (_req, res) => {
-  const result = runCliSync(['identity', 'whoami']);
+  // icp CLI: 'identity default' (no arg) = whoami
+  const cmd = CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami'];
+  const result = runCliSync(cmd);
   if (!result.ok) return res.status(500).json({ error: result.data });
   res.json({ identity: result.data });
 });
@@ -209,39 +223,12 @@ app.post('/api/project/info', (req, res) => {
   const hasIcpYaml = existsSync(icpYamlPath);
 
   if (!hasDfxJson && !hasIcpYaml) {
-    return res.status(404).json({ error: 'No dfx.json or icp.yaml found in that folder' });
+    return res.status(404).json({ error: 'No icp.yaml or dfx.json found in that folder' });
   }
 
   try {
-    if (hasDfxJson) {
-      const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
-      const canisters = Object.entries(dfxJson.canisters || {}).map(
-        ([name, config]) => ({
-          name,
-          type: config.type || 'unknown',
-          main: config.main || null,
-          source: config.source ? config.source[0] : null,
-          dependencies: config.dependencies || [],
-          remote: config.remote || null,
-          pullType: config.type === 'pull' ? true : false,
-        })
-      );
-      // Collect networks from dfx.json config + canister_ids.json
-      const networkSet = new Set(Object.keys(dfxJson.networks || {}));
-      // Also discover networks from canister_ids.json entries
-      const canisterIds = readCanisterIds(projectPath);
-      for (const canisterEntry of Object.values(canisterIds)) {
-        if (canisterEntry && typeof canisterEntry === 'object') {
-          for (const netKey of Object.keys(canisterEntry)) {
-            networkSet.add(netKey);
-          }
-        }
-      }
-      // Always include 'local' and 'ic' if they aren't already
-      networkSet.add('local');
-      const networks = [...networkSet];
-      res.json({ canisters, networks, raw: dfxJson, configType: 'dfx.json' });
-    } else {
+    // Prefer icp.yaml when both exist (modern ICP CLI format)
+    if (hasIcpYaml) {
       // icp.yaml parsing: line-based parser for canisters array and environments
       const yamlContent = readFileSync(icpYamlPath, 'utf-8');
       const canisters = [];
@@ -303,54 +290,118 @@ app.post('/api/project/info', (req, res) => {
         networkSet.add(env.name);
       }
       res.json({ canisters, networks: [...networkSet], environments, raw: yamlContent, configType: 'icp.yaml' });
+    } else {
+      // Legacy dfx.json parsing
+      const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
+      const canisters = Object.entries(dfxJson.canisters || {}).map(
+        ([name, config]) => ({
+          name,
+          type: config.type || 'unknown',
+          main: config.main || null,
+          source: config.source ? config.source[0] : null,
+          dependencies: config.dependencies || [],
+          remote: config.remote || null,
+          pullType: config.type === 'pull' ? true : false,
+        })
+      );
+      // Collect networks from dfx.json config + canister_ids.json
+      const networkSet = new Set(Object.keys(dfxJson.networks || {}));
+      const canisterIds = readCanisterIds(projectPath);
+      for (const canisterEntry of Object.values(canisterIds)) {
+        if (canisterEntry && typeof canisterEntry === 'object') {
+          for (const netKey of Object.keys(canisterEntry)) {
+            networkSet.add(netKey);
+          }
+        }
+      }
+      networkSet.add('local');
+      const networks = [...networkSet];
+      res.json({ canisters, networks, raw: dfxJson, configType: 'dfx.json' });
     }
   } catch (e) {
     res.status(500).json({ error: `Failed to parse project config: ${e.message}` });
   }
 });
 
-// Add or remove a network in dfx.json
+// Add or remove an environment/network in icp.yaml or dfx.json
 app.post('/api/project/network', (req, res) => {
   const { path: projectPath, action, name, config } = req.body;
   if (!projectPath) return res.status(400).json({ error: 'path required' });
   if (!name) return res.status(400).json({ error: 'network name required' });
   try { assertSafeName(name, 'network name'); } catch (e) { return res.status(400).json({ error: e.message }); }
-  if (name === 'local') return res.status(400).json({ error: 'Cannot modify the local network' });
+  if (name === 'local') return res.status(400).json({ error: 'Cannot modify the local environment' });
 
+  const icpYamlPath = join(projectPath, 'icp.yaml');
   const dfxPath = join(projectPath, 'dfx.json');
-  if (!existsSync(dfxPath)) return res.status(404).json({ error: 'No dfx.json found' });
+  const hasIcpYaml = existsSync(icpYamlPath);
+  const hasDfxJson = existsSync(dfxPath);
+
+  if (!hasIcpYaml && !hasDfxJson) return res.status(404).json({ error: 'No icp.yaml or dfx.json found' });
 
   try {
-    const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
-    if (!dfxJson.networks) dfxJson.networks = {};
+    if (hasIcpYaml) {
+      // icp.yaml: manage environments section
+      let yamlContent = readFileSync(icpYamlPath, 'utf-8');
 
-    if (action === 'add') {
-      if (dfxJson.networks[name]) return res.status(409).json({ error: `Network "${name}" already exists` });
-      // Default config for a persistent mainnet network
-      dfxJson.networks[name] = config || {
-        providers: ['https://icp-api.io'],
-        type: 'persistent',
-      };
-    } else if (action === 'remove') {
-      if (!dfxJson.networks[name]) return res.status(404).json({ error: `Network "${name}" not found` });
-      if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) network' });
-      delete dfxJson.networks[name];
-    } else {
-      return res.status(400).json({ error: 'action must be "add" or "remove"' });
-    }
-
-    writeFileSync(dfxPath, JSON.stringify(dfxJson, null, 2) + '\n');
-    const networks = Object.keys(dfxJson.networks);
-    // Also include networks from canister_ids.json
-    const canisterIds = readCanisterIds(projectPath);
-    const networkSet = new Set(networks);
-    for (const entry of Object.values(canisterIds)) {
-      if (entry && typeof entry === 'object') {
-        for (const k of Object.keys(entry)) networkSet.add(k);
+      if (action === 'add') {
+        // Check if environment already exists
+        if (new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*$`, 'm').test(yamlContent)) {
+          return res.status(409).json({ error: `Environment "${name}" already exists` });
+        }
+        // Append environment to the environments section, or create it
+        const envBlock = `  - name: ${name}\n    network: ic\n`;
+        if (/^environments:/m.test(yamlContent)) {
+          yamlContent = yamlContent.replace(/^(environments:)/m, `$1\n${envBlock}`);
+        } else {
+          yamlContent += `\nenvironments:\n${envBlock}`;
+        }
+      } else if (action === 'remove') {
+        if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) environment' });
+        // Remove the environment entry (name line + following indented lines until next - name: or section)
+        const envRegex = new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*\\n(?:\\s{4,}\\S[^\\n]*\\n)*`, 'gm');
+        const newContent = yamlContent.replace(envRegex, '');
+        if (newContent === yamlContent) return res.status(404).json({ error: `Environment "${name}" not found` });
+        yamlContent = newContent;
+      } else {
+        return res.status(400).json({ error: 'action must be "add" or "remove"' });
       }
+
+      writeFileSync(icpYamlPath, yamlContent);
+      // Re-parse to return updated network list
+      const networkSet = new Set(['local', 'ic']);
+      const envMatches = yamlContent.matchAll(/^\s+-\s+name:\s*(.+)/gm);
+      for (const m of envMatches) networkSet.add(m[1].trim().replace(/^["']|["']$/g, ''));
+      res.json({ ok: true, networks: [...networkSet] });
+    } else {
+      // Legacy dfx.json: manage networks section
+      const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
+      if (!dfxJson.networks) dfxJson.networks = {};
+
+      if (action === 'add') {
+        if (dfxJson.networks[name]) return res.status(409).json({ error: `Network "${name}" already exists` });
+        dfxJson.networks[name] = config || {
+          providers: ['https://icp-api.io'],
+          type: 'persistent',
+        };
+      } else if (action === 'remove') {
+        if (!dfxJson.networks[name]) return res.status(404).json({ error: `Network "${name}" not found` });
+        if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) network' });
+        delete dfxJson.networks[name];
+      } else {
+        return res.status(400).json({ error: 'action must be "add" or "remove"' });
+      }
+
+      writeFileSync(dfxPath, JSON.stringify(dfxJson, null, 2) + '\n');
+      const networkSet = new Set(Object.keys(dfxJson.networks));
+      const canisterIds = readCanisterIds(projectPath);
+      for (const entry of Object.values(canisterIds)) {
+        if (entry && typeof entry === 'object') {
+          for (const k of Object.keys(entry)) networkSet.add(k);
+        }
+      }
+      networkSet.add('local');
+      res.json({ ok: true, networks: [...networkSet] });
     }
-    networkSet.add('local');
-    res.json({ ok: true, networks: [...networkSet] });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -363,10 +414,12 @@ function parseCanisterStatus(raw) {
   const statusMatch = raw.match(/Status:\s*(\w+)/i);
   parsed.runningStatus = statusMatch ? statusMatch[1] : 'unknown';
 
-  const cyclesMatch = raw.match(/Balance:\s*([\d_,]+)\s*Cycles/i);
-  parsed.cycles = cyclesMatch ? cyclesMatch[1].replace(/[_,]/g, '') : null;
+  // dfx: "Balance: 72_702_614_651 Cycles" — icp CLI: "Cycles: 72_702_614_651"
+  const cyclesMatch = raw.match(/(?:Balance:\s*([\d_,]+)\s*Cycles|Cycles:\s*([\d_,]+))/i);
+  parsed.cycles = cyclesMatch ? (cyclesMatch[1] || cyclesMatch[2]).replace(/[_,]/g, '') : null;
 
-  const memoryMatch = raw.match(/Memory\s*(?:allocation|Size):\s*([\d_,]+)/i);
+  // dfx: "Memory Size: ..." — icp CLI: "Memory size: ..."
+  const memoryMatch = raw.match(/Memory\s*(?:allocation|[Ss]ize):\s*([\d_,]+)/i);
   parsed.memoryBytes = memoryMatch ? memoryMatch[1].replace(/[_,]/g, '') : null;
 
   const moduleMatch = raw.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
@@ -379,6 +432,10 @@ function parseCanisterStatus(raw) {
   parsed.controllers = controllersMatch
     ? controllersMatch[1].split(/\s+/).filter(Boolean)
     : [];
+
+  // icp CLI extras: idle burn rate, reserved cycles
+  const idleBurnMatch = raw.match(/Idle cycles burned per day:\s*([\d_,]+)/i);
+  parsed.idleBurnPerDay = idleBurnMatch ? idleBurnMatch[1].replace(/[_,]/g, '') : null;
 
   parsed.raw = raw;
   return parsed;
