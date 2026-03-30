@@ -16,7 +16,7 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - **Dependencies**: express ^4.21.0, ws ^8.18.0 (minimal)
 - **Startup**: `node server.js` → open http://localhost:3456
 
-## Features Built (as of 2026-03-25)
+## Features Built (as of 2026-03-27)
 
 ### Security
 - **Command injection prevention**: All CLI calls use `spawnSync` with argument arrays (never string interpolation)
@@ -79,6 +79,33 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - **Version info in canister cards**: Canister status cards show version info from deploy history when module hash matches
 - **Graceful fallback**: Shows "no deploy history" for canisters deployed before this feature existed
 
+### Build Before Deploy
+- **Build toggle**: Toggle switch in deploy settings to run `icp build` before deploying (on by default)
+- **Integrated build**: When enabled, deploy WebSocket streams build output before deploy output
+- **Build failure handling**: If build fails, deploy is aborted with error status
+- **Standalone build endpoint**: `POST /api/build` for building without deploying
+
+### Cycles Top-Up
+- **Top-up button**: On canister cards, button to add cycles to a canister
+- **Amount input**: Prompt for cycles amount to add
+- **Confirmation modal**: Shows amount and network before executing
+
+### Controller Management
+- **Add controller button**: Shown on canister cards with single controller (lockout risk)
+- **Principal input**: Prompt for principal ID to add
+- **Confirmation**: Shows truncated principal and network before executing
+
+### Multi-Project Support
+- **Recent projects**: Shows up to 5 recent projects as quick-switch buttons below project path
+- **Auto-save**: Projects automatically saved to recent list when loaded
+- **Quick load**: Click a recent project button to instantly load it
+
+### Settings Persistence
+- **Settings file**: `~/.canister-panel-settings.json` stores user preferences
+- **Persisted settings**: Last project path, last network, build-before-deploy toggle, recent projects list
+- **Auto-load**: Settings restored on app startup
+- **Auto-save**: Settings saved when project loaded, network changed, or build toggle changed
+
 ### Local Replica
 - **Status detection**: Shows whether local replica is running
 - **Start replica**: Can start local dfx replica from the UI
@@ -116,11 +143,19 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - `POST /api/canister/snapshot/download` — download snapshot to path
 - `POST /api/canister/snapshot/upload` — upload snapshot from path
 
+### Build
+- `POST /api/build` — build canisters (5 min timeout)
+
 ### Deploy
 - `POST /api/deploy/summary` — deployment readiness analysis (git status, per-canister deployed state)
 - `POST /api/wallet/balance` — wallet cycles balance
 - `POST /api/cycles/balance` — canister cycles balance
 - WebSocket: live deploy streaming (deploy, cancel, start-replica)
+
+### Settings
+- `GET /api/settings` — read persisted settings
+- `POST /api/settings` — merge-update settings
+- `POST /api/settings/add-project` — add project to recent list
 
 ### Replica
 - `GET /api/dfx/status` — check if local replica is running
@@ -148,10 +183,12 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - `dfx canister update-settings <name>` — update settings
 - `dfx wallet balance` — cycles wallet balance
 
+## CLI Detection
+- CLI is now detected as `icp 0.2.1`, project uses `icp.yaml` format
+
 ## Limitations
-- Cannot top up cycles from within the app (requires ICP → cycles conversion via NNS)
 - Browser folder picker doesn't give real filesystem paths — uses text input + server-side browse
-- dfx must be installed on the user's machine
+- dfx or icp CLI must be installed on the user's machine
 - icp.yaml parsing is basic (line-based, not a full YAML parser)
 - Snapshot download/upload requires manual filesystem paths
 
@@ -161,6 +198,16 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - Network toggle only visible on Deploy tab — moved to global position
 - `execSync` with string interpolation (command injection risk) — replaced with `spawnSync` argument arrays
 - Remote canisters (evm_rpc) showing controller errors — now detected and displayed as external dependencies
+- API helpers not checking HTTP status — fixed, now throw on non-200
+- Identity switch not calling server — fixed, now calls /api/identity/use
+- BigInt crash on unexpected cycles format — fixed with try/catch and sanitization
+- Snapshot actions permanently stuck on error — fixed with try/catch
+- WebSocket JSON.parse crash — fixed with try/catch
+- isRemoteForNetwork broken for custom networks — fixed to check exact network key
+- SnapshotsTab showing remote canisters — fixed to pass ownedCanisters
+- onBlur reloading already-loaded projects — fixed with projectLoaded check
+- Snapshot buttons not disabled when canister running — fixed
+- Hardcoded "dfx" references in UI messages — changed to generic "project config"
 
 ## Project Location
 - Dashboard code: `/Users/christopher.harrison/Code/Canister Control Panel/`

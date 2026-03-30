@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ICP Deploy Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -41,15 +42,25 @@
     // ---- API helpers ----
     const api = {
       async get(url) {
-        const r = await fetch(url);
+        const r = await fetch(url, {
+          headers: { 'X-Requested-With': 'CanisterPanel' },
+        });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error || `HTTP ${r.status}`);
+        }
         return r.json();
       },
       async post(url, body) {
         const r = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'CanisterPanel' },
           body: JSON.stringify(body),
         });
+        if (!r.ok) {
+          const errBody = await r.json().catch(() => ({}));
+          throw new Error(errBody.error || `HTTP ${r.status}`);
+        }
         return r.json();
       },
     };
@@ -148,7 +159,7 @@
                   <button
                     key={entry.path}
                     onClick={() => {
-                      if (entry.hasDfxJson) {
+                      if (entry.isIcpProject) {
                         onSelect(entry.path);
                         onClose();
                       } else {
@@ -156,18 +167,18 @@
                       }
                     }}
                     className={`w-full flex items-center gap-3 p-2.5 rounded-lg hover:bg-surface-800 transition-colors ${
-                      entry.hasDfxJson ? 'bg-icp-500/10 border border-icp-500/20' : ''
+                      entry.isIcpProject ? 'bg-icp-500/10 border border-icp-500/20' : ''
                     }`}
                   >
-                    <FolderIcon className={`w-5 h-5 ${entry.hasDfxJson ? 'text-icp-400' : 'text-gray-500'}`} />
+                    <FolderIcon className={`w-5 h-5 ${entry.isIcpProject ? 'text-icp-400' : 'text-gray-500'}`} />
                     <div className="flex-1 text-left">
-                      <span className={`text-sm ${entry.hasDfxJson ? 'text-white font-medium' : 'text-gray-300'}`}>
+                      <span className={`text-sm ${entry.isIcpProject ? 'text-white font-medium' : 'text-gray-300'}`}>
                         {entry.name}
                       </span>
                     </div>
-                    {entry.hasDfxJson ? (
+                    {entry.isIcpProject ? (
                       <span className="text-[11px] bg-icp-500/20 text-icp-400 px-2 py-0.5 rounded-full font-medium">
-                        dfx project
+                        {entry.hasIcpYaml ? 'ICP project' : 'dfx project'}
                       </span>
                     ) : (
                       <ChevronIcon className="w-4 h-4 text-gray-600" />
@@ -203,6 +214,161 @@
             <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
               <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
               <button onClick={onConfirm} className={`px-4 py-2 text-sm font-medium rounded-lg ${danger ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-icp-500 hover:bg-icp-600 text-white'}`}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Mint Cycles Modal ----
+    function MintModal({ isOpen, onClose, icpBalance, cyclesBalance, onMinted }) {
+      const [amount, setAmount] = useState('');
+      const [unit, setUnit] = useState('icp'); // 'icp' or 'cycles'
+      const [minting, setMinting] = useState(false);
+      const [result, setResult] = useState(null);
+
+      if (!isOpen) return null;
+
+      const handleMint = async () => {
+        if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+        setMinting(true);
+        setResult(null);
+        try {
+          const data = await api.post('/api/cycles/mint', { amount, unit });
+          setResult(data);
+          if (data.ok) { setAmount(''); onMinted(); }
+        } catch (e) {
+          setResult({ ok: false, output: e.message });
+        }
+        setMinting(false);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
+            <div className="p-5 border-b border-surface-700">
+              <h3 className="text-base font-semibold text-white">Mint Cycles</h3>
+              <p className="text-xs text-gray-500 mt-1">Convert ICP to cycles for your identity</p>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex gap-2 text-xs">
+                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP</span>
+                <span className="px-2 py-1 bg-surface-800 rounded text-green-400 font-mono">{cyclesBalance ? (() => { const n = Number(cyclesBalance); return n >= 1e12 ? `${(n/1e12).toFixed(2)}T` : n >= 1e9 ? `${(n/1e9).toFixed(2)}B` : n.toLocaleString(); })() : '—'} cycles</span>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1.5">Amount</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder={unit === 'icp' ? '0.5' : '1000000000000'}
+                    className="flex-1 bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-icp-500"
+                  />
+                  <div className="flex bg-surface-800 border border-surface-700 rounded-lg overflow-hidden">
+                    <button onClick={() => setUnit('icp')} className={`px-3 py-2 text-xs font-medium transition-colors ${unit === 'icp' ? 'bg-icp-500 text-white' : 'text-gray-400 hover:text-white'}`}>ICP</button>
+                    <button onClick={() => setUnit('cycles')} className={`px-3 py-2 text-xs font-medium transition-colors ${unit === 'cycles' ? 'bg-green-500 text-white' : 'text-gray-400 hover:text-white'}`}>Cycles</button>
+                  </div>
+                </div>
+                <p className="text-[11px] text-gray-600 mt-1.5">
+                  {unit === 'icp' ? `Burns ${amount || '0'} ICP to mint cycles` : `Mints ${Number(amount || 0).toLocaleString()} cycles (ICP auto-calculated)`}
+                </p>
+              </div>
+              {result && (
+                <div className={`p-3 rounded-lg text-xs font-mono ${result.ok ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
+                  {result.output}
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
+              <button onClick={() => { onClose(); setAmount(''); setResult(null); }} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Close</button>
+              <button onClick={handleMint} disabled={minting || !amount} className="px-4 py-2 text-sm font-medium rounded-lg bg-icp-500 hover:bg-icp-600 text-white disabled:opacity-50 disabled:cursor-not-allowed">
+                {minting ? 'Minting...' : 'Mint Cycles'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Top Up Modal (with source choice) ----
+    function TopUpModal({ isOpen, canisterName, onClose, icpBalance, cyclesBalance, onTopUp }) {
+      const [amount, setAmount] = useState('');
+      const [source, setSource] = useState('cycles');
+
+      if (!isOpen) return null;
+
+      const formatBal = (c) => {
+        if (!c) return '—';
+        const n = Number(c);
+        if (n >= 1e12) return `${(n/1e12).toFixed(2)}T`;
+        if (n >= 1e9) return `${(n/1e9).toFixed(2)}B`;
+        if (n >= 1e6) return `${(n/1e6).toFixed(1)}M`;
+        return n.toLocaleString();
+      };
+
+      const handleSubmit = () => {
+        if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+        onTopUp(canisterName, amount, source);
+        setAmount('');
+        onClose();
+      };
+
+      const presets = [
+        { label: '100B', value: '100000000000' },
+        { label: '500B', value: '500000000000' },
+        { label: '1T', value: '1000000000000' },
+        { label: '5T', value: '5000000000000' },
+      ];
+
+      return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
+            <div className="p-5 border-b border-surface-700">
+              <h3 className="text-base font-semibold text-white">Top Up "{canisterName}"</h3>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex gap-2 text-xs">
+                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP</span>
+                <span className="px-2 py-1 bg-surface-800 rounded text-green-400 font-mono">{formatBal(cyclesBalance)} cycles</span>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1.5">Cycles Amount</label>
+                <input
+                  type="text"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="e.g. 1000000000000 (1T)"
+                  className="w-full bg-surface-800 border border-surface-700 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-icp-500"
+                />
+                <div className="flex gap-1.5 mt-2">
+                  {presets.map((p) => (
+                    <button key={p.label} onClick={() => setAmount(p.value)} className="px-2 py-1 text-[11px] bg-surface-800 border border-surface-700 rounded text-gray-400 hover:text-white hover:border-icp-500/50 transition-colors font-mono">{p.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1.5">Pay From</label>
+                <div className="flex gap-2">
+                  <button onClick={() => setSource('cycles')} className={`flex-1 p-3 rounded-lg border text-left transition-colors ${source === 'cycles' ? 'border-green-500/50 bg-green-500/10' : 'border-surface-700 bg-surface-800 hover:border-surface-600'}`}>
+                    <span className={`text-sm font-medium ${source === 'cycles' ? 'text-green-400' : 'text-gray-300'}`}>Cycles Balance</span>
+                    <p className="text-[11px] text-gray-500 mt-0.5">{formatBal(cyclesBalance)} available</p>
+                  </button>
+                  <button onClick={() => setSource('icp')} className={`flex-1 p-3 rounded-lg border text-left transition-colors ${source === 'icp' ? 'border-icp-500/50 bg-icp-500/10' : 'border-surface-700 bg-surface-800 hover:border-surface-600'}`}>
+                    <span className={`text-sm font-medium ${source === 'icp' ? 'text-icp-400' : 'text-gray-300'}`}>ICP (auto-mint)</span>
+                    <p className="text-[11px] text-gray-500 mt-0.5">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP available</p>
+                  </button>
+                </div>
+                {source === 'icp' && (
+                  <p className="text-[11px] text-yellow-400/80 mt-1.5">Will burn ICP to mint cycles, then top up the canister</p>
+                )}
+              </div>
+            </div>
+            <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
+              <button onClick={() => { onClose(); setAmount(''); }} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
+              <button onClick={handleSubmit} disabled={!amount || isNaN(Number(amount)) || Number(amount) <= 0} className={`px-4 py-2 text-sm font-medium rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed ${source === 'icp' ? 'bg-icp-500 hover:bg-icp-600' : 'bg-green-600 hover:bg-green-700'}`}>
+                Top Up {amount ? formatBal(amount) : ''} cycles
+              </button>
             </div>
           </div>
         </div>
@@ -397,18 +563,22 @@
         if (selectedCanister && projectPath) fetchSnapshots();
       }, [selectedCanister, projectPath, network]);
 
-      // Actions
+      // Actions — all wrapped in try/catch to prevent stuck loading states
       const createSnapshot = async () => {
         setActionLoading('create');
         setMessage(null);
-        const data = await api.post('/api/canister/snapshot/create', {
-          path: projectPath, canister: selectedCanister, network,
-        });
-        if (data.ok) {
-          setMessage({ type: 'success', text: `Snapshot created${data.snapshotId ? ': ' + data.snapshotId : ''}` });
-          fetchSnapshots();
-        } else {
-          setMessage({ type: 'error', text: data.error || 'Failed to create snapshot' });
+        try {
+          const data = await api.post('/api/canister/snapshot/create', {
+            path: projectPath, canister: selectedCanister, network,
+          });
+          if (data.ok) {
+            setMessage({ type: 'success', text: `Snapshot created${data.snapshotId ? ': ' + data.snapshotId : ''}` });
+            fetchSnapshots();
+          } else {
+            setMessage({ type: 'error', text: data.error || 'Failed to create snapshot' });
+          }
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
         }
         setActionLoading(null);
       };
@@ -416,14 +586,18 @@
       const loadSnapshot = async (snapshotId) => {
         setActionLoading('load:' + snapshotId);
         setMessage(null);
-        const data = await api.post('/api/canister/snapshot/load', {
-          path: projectPath, canister: selectedCanister, network, snapshotId,
-        });
-        if (data.ok) {
-          setMessage({ type: 'success', text: 'Snapshot restored successfully' });
-          fetchSnapshots();
-        } else {
-          setMessage({ type: 'error', text: data.output || 'Failed to load snapshot' });
+        try {
+          const data = await api.post('/api/canister/snapshot/load', {
+            path: projectPath, canister: selectedCanister, network, snapshotId,
+          });
+          if (data.ok) {
+            setMessage({ type: 'success', text: 'Snapshot restored successfully' });
+            fetchSnapshots();
+          } else {
+            setMessage({ type: 'error', text: data.output || 'Failed to load snapshot' });
+          }
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
         }
         setActionLoading(null);
       };
@@ -431,14 +605,18 @@
       const deleteSnapshot = async (snapshotId) => {
         setActionLoading('delete:' + snapshotId);
         setMessage(null);
-        const data = await api.post('/api/canister/snapshot/delete', {
-          path: projectPath, canister: selectedCanister, network, snapshotId,
-        });
-        if (data.ok) {
-          setMessage({ type: 'success', text: 'Snapshot deleted' });
-          fetchSnapshots();
-        } else {
-          setMessage({ type: 'error', text: data.output || 'Failed to delete snapshot' });
+        try {
+          const data = await api.post('/api/canister/snapshot/delete', {
+            path: projectPath, canister: selectedCanister, network, snapshotId,
+          });
+          if (data.ok) {
+            setMessage({ type: 'success', text: 'Snapshot deleted' });
+            fetchSnapshots();
+          } else {
+            setMessage({ type: 'error', text: data.output || 'Failed to delete snapshot' });
+          }
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
         }
         setActionLoading(null);
       };
@@ -447,14 +625,18 @@
         if (!downloadDir) { setMessage({ type: 'error', text: 'Enter a directory path' }); return; }
         setActionLoading('download:' + snapshotId);
         setMessage({ type: 'info', text: 'Downloading snapshot... this may take a while for large canisters' });
-        const data = await api.post('/api/canister/snapshot/download', {
-          path: projectPath, canister: selectedCanister, network, snapshotId, dir: downloadDir,
-        });
-        if (data.ok) {
-          setMessage({ type: 'success', text: `Snapshot downloaded to ${downloadDir}` });
-          setShowDownloadInput(null);
-        } else {
-          setMessage({ type: 'error', text: data.error || 'Download failed' });
+        try {
+          const data = await api.post('/api/canister/snapshot/download', {
+            path: projectPath, canister: selectedCanister, network, snapshotId, dir: downloadDir,
+          });
+          if (data.ok) {
+            setMessage({ type: 'success', text: `Snapshot downloaded to ${downloadDir}` });
+            setShowDownloadInput(null);
+          } else {
+            setMessage({ type: 'error', text: data.error || 'Download failed' });
+          }
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
         }
         setActionLoading(null);
       };
@@ -463,28 +645,36 @@
         if (!uploadDir) { setMessage({ type: 'error', text: 'Enter a directory path' }); return; }
         setActionLoading('upload');
         setMessage({ type: 'info', text: 'Uploading snapshot... this may take a while' });
-        const data = await api.post('/api/canister/snapshot/upload', {
-          path: projectPath, canister: selectedCanister, network, dir: uploadDir,
-        });
-        if (data.ok) {
-          setMessage({ type: 'success', text: `Snapshot uploaded${data.snapshotId ? ': ' + data.snapshotId : ''}` });
-          setShowUploadInput(false);
-          fetchSnapshots();
-        } else {
-          setMessage({ type: 'error', text: data.error || 'Upload failed' });
+        try {
+          const data = await api.post('/api/canister/snapshot/upload', {
+            path: projectPath, canister: selectedCanister, network, dir: uploadDir,
+          });
+          if (data.ok) {
+            setMessage({ type: 'success', text: `Snapshot uploaded${data.snapshotId ? ': ' + data.snapshotId : ''}` });
+            setShowUploadInput(false);
+            fetchSnapshots();
+          } else {
+            setMessage({ type: 'error', text: data.error || 'Upload failed' });
+          }
+        } catch (e) {
+          setMessage({ type: 'error', text: e.message });
         }
         setActionLoading(null);
       };
 
       const fetchMetadata = async (name) => {
         setMetadata(null);
-        const data = await api.post('/api/canister/metadata', {
-          path: projectPath, canister: selectedCanister, network, metadataName: name,
-        });
-        if (data.ok) {
-          setMetadata({ name, data: data.data });
-        } else {
-          setMetadata({ name, error: data.error });
+        try {
+          const data = await api.post('/api/canister/metadata', {
+            path: projectPath, canister: selectedCanister, network, metadataName: name,
+          });
+          if (data.ok) {
+            setMetadata({ name, data: data.data });
+          } else {
+            setMetadata({ name, error: data.error });
+          }
+        } catch (e) {
+          setMetadata({ name, error: e.message });
         }
       };
 
@@ -578,7 +768,7 @@
                 <p className="text-[11px] text-gray-500 mb-3">Saves canister WASM, heap, stable memory, and all data. Max 10 per canister.</p>
                 <button
                   onClick={createSnapshot}
-                  disabled={!!actionLoading}
+                  disabled={!!actionLoading || isRunning}
                   className="w-full py-2.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-xl text-sm font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
                 >
                   {actionLoading === 'create' ? <><SpinnerIcon className="w-4 h-4" /> Creating...</> : (
@@ -604,7 +794,7 @@
                     <div className="flex gap-2">
                       <button
                         onClick={uploadSnapshot}
-                        disabled={!uploadDir || !!actionLoading}
+                        disabled={!uploadDir || !!actionLoading || isRunning}
                         className="flex-1 py-2 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-lg text-xs font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-1"
                       >
                         {actionLoading === 'upload' ? <><SpinnerIcon className="w-3 h-3" /> Uploading...</> : 'Upload'}
@@ -615,7 +805,7 @@
                 ) : (
                   <button
                     onClick={() => setShowUploadInput(true)}
-                    disabled={!!actionLoading}
+                    disabled={!!actionLoading || isRunning}
                     className="w-full py-2.5 bg-surface-800 text-gray-300 border border-surface-700 rounded-xl text-sm font-medium hover:bg-surface-700 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
                   >
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
@@ -705,7 +895,7 @@
                             {/* Restore */}
                             <button
                               onClick={() => setConfirmAction({ type: 'load', id: snap.id })}
-                              disabled={!!actionLoading}
+                              disabled={!!actionLoading || isRunning}
                               className="px-2.5 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-lg hover:bg-icp-500/20 disabled:opacity-40 transition-colors"
                               title="Restore this snapshot"
                             >
@@ -790,7 +980,7 @@
     }
 
     // ---- Deploy Summary View ----
-    function DeploySummaryView({ summary, loading, network, projectLoaded }) {
+    function DeploySummaryView({ summary, loading, network, projectLoaded, canisterConfigs }) {
       if (!projectLoaded) {
         return <p className="text-gray-600 text-sm">Load a project to see deployment summary.</p>;
       }
@@ -808,54 +998,89 @@
         return <p className="text-red-400 text-sm">{summary.error}</p>;
       }
 
-      const { canisters = {}, git: rawGit } = summary;
-      const git = rawGit || {};
+      const { canisters = {} } = summary;
       const canisterNames = Object.keys(canisters);
       const summaryNetLabel = network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1);
 
+      // Count deployment states
+      const deployed = canisterNames.filter(n => canisters[n].canisterId);
+      const needsRedeploy = canisterNames.filter(n => canisters[n].hashMatch === false);
+      const upToDate = canisterNames.filter(n => canisters[n].hashMatch === true);
+      const notDeployed = canisterNames.filter(n => !canisters[n].canisterId);
+
       return (
         <div className="space-y-4 text-sm">
-          {/* Canister deployment status */}
+          {/* Deployment Status — local build vs on-chain */}
           <div>
-            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Canisters on {summaryNetLabel}</h4>
+            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Deployment Status — {summaryNetLabel}</h4>
+            {needsRedeploy.length > 0 && (
+              <div className="mb-2 flex items-center gap-2 p-2 bg-orange-500/10 border border-orange-500/20 rounded-lg">
+                <svg className="w-3.5 h-3.5 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                <span className="text-[11px] text-orange-300">{needsRedeploy.length} canister{needsRedeploy.length > 1 ? 's have' : ' has'} local changes not yet deployed</span>
+              </div>
+            )}
             <div className="space-y-2">
               {canisterNames.map((name) => {
                 const c = canisters[name];
-                const deployed = !!c.canisterId;
+                const isDeployed = !!c.canisterId;
                 const hasLocalWasm = c.localWasmExists;
+                const conf = (canisterConfigs || []).find(cc => cc.name === name);
+                const isRemote = conf && (conf.remote || conf.type === 'pull' || conf.type === 'unknown');
+
+                // Determine deploy state
+                let badge, badgeClass;
+                if (isRemote) {
+                  badge = 'External'; badgeClass = 'bg-gray-500/20 text-gray-500';
+                } else if (!isDeployed) {
+                  badge = 'Not Deployed'; badgeClass = 'bg-gray-500/20 text-gray-400';
+                } else if (c.hashMatch === true) {
+                  badge = 'Up to Date'; badgeClass = 'bg-green-500/20 text-green-400';
+                } else if (c.hashMatch === false) {
+                  badge = 'Outdated'; badgeClass = 'bg-orange-500/20 text-orange-400';
+                } else {
+                  badge = 'Deployed'; badgeClass = 'bg-blue-500/20 text-blue-400';
+                }
+
                 return (
-                  <div key={name} className="bg-surface-900 border border-surface-700 rounded-lg p-3">
+                  <div key={name} className={`bg-surface-900 border rounded-lg p-3 ${c.hashMatch === false ? 'border-orange-500/30' : 'border-surface-700'}`}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-white font-medium">{name}</span>
-                      {deployed ? (
-                        <span className="text-[11px] bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full">Deployed</span>
-                      ) : (
-                        <span className="text-[11px] bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">Not Deployed</span>
-                      )}
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full ${badgeClass}`}>{badge}</span>
                     </div>
-                    {deployed && (
+                    {isDeployed && (
                       <div className="text-xs text-gray-500 space-y-0.5">
                         <div>ID: <span className="text-gray-400 font-mono">{c.canisterId}</span></div>
-                        {c.version ? (
+                        {c.status && <div>Status: <span className={c.status === 'Running' ? 'text-green-400' : 'text-yellow-400'}>{c.status}</span></div>}
+                        {c.hashMatch === false && (
+                          <div className="mt-1 text-orange-400">
+                            <div>Local build differs from deployed version</div>
+                            <div className="text-[10px] text-gray-600 font-mono mt-0.5">
+                              Local: {c.localWasmHash ? c.localWasmHash.slice(0, 18) + '...' : 'unknown'}
+                            </div>
+                            <div className="text-[10px] text-gray-600 font-mono">
+                              Chain: {c.moduleHash ? c.moduleHash.slice(0, 18) + '...' : 'unknown'}
+                            </div>
+                          </div>
+                        )}
+                        {c.hashMatch === true && c.version && (
                           <div className="flex items-center gap-1.5">
-                            <span className="text-gray-500">Version:</span>
+                            <span className="text-gray-500">Deployed:</span>
                             <span className="text-icp-400 font-mono">{c.version.gitCommit}</span>
                             {c.version.gitBranch && <span className="text-gray-600">({c.version.gitBranch})</span>}
-                            {c.version.gitDirty && <span className="text-yellow-400 text-[10px]">dirty</span>}
                             {c.version.timestamp && (
                               <span className="text-gray-600">— {new Date(c.version.timestamp).toLocaleDateString()}</span>
                             )}
                           </div>
-                        ) : (
-                          c.moduleHash && c.moduleHash !== 'None' && <div>Module: <span className="text-gray-400 font-mono">{c.moduleHash.slice(0, 16)}...</span> <span className="text-gray-600">(no deploy history)</span></div>
                         )}
-                        {c.status && <div>Status: <span className={c.status === 'Running' ? 'text-green-400' : 'text-yellow-400'}>{c.status}</span></div>}
+                        {c.hashMatch === null && c.moduleHash && c.moduleHash !== 'None' && !c.localWasmHash && !isRemote && (
+                          <div className="text-gray-600 text-[11px]">No local build found — run a build to compare</div>
+                        )}
                       </div>
                     )}
-                    {!deployed && hasLocalWasm && (
+                    {!isDeployed && hasLocalWasm && (
                       <div className="text-xs text-gray-500">Local WASM ready — will be a fresh install</div>
                     )}
-                    {!deployed && !hasLocalWasm && (
+                    {!isDeployed && !hasLocalWasm && (
                       <div className="text-xs text-gray-500">No local WASM — build required before deploy</div>
                     )}
                   </div>
@@ -864,39 +1089,6 @@
             </div>
           </div>
 
-          {/* Git status */}
-          {Array.isArray(git.uncommittedChanges) && git.uncommittedChanges.length > 0 && (
-            <div>
-              <h4 className="text-xs font-semibold text-yellow-400 uppercase tracking-wider mb-2">Uncommitted Changes</h4>
-              <div className="bg-surface-900 border border-yellow-500/20 rounded-lg p-3">
-                <pre className="text-xs text-yellow-300 whitespace-pre-wrap">{git.uncommittedChanges.join('\n')}</pre>
-              </div>
-            </div>
-          )}
-
-          {git.diffStat && (
-            <div>
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Changes Since Last Deploy</h4>
-              <div className="bg-surface-900 border border-surface-700 rounded-lg p-3">
-                <pre className="text-xs text-gray-400 whitespace-pre-wrap">{git.diffStat}</pre>
-              </div>
-            </div>
-          )}
-
-          {Array.isArray(git.recentCommits) && git.recentCommits.length > 0 && (
-            <div>
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Recent Commits</h4>
-              <div className="bg-surface-900 border border-surface-700 rounded-lg p-3 space-y-1">
-                {git.recentCommits.map((commit, i) => (
-                  <div key={i} className="text-xs text-gray-400 truncate">{commit}</div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {(!Array.isArray(git.recentCommits) || git.recentCommits.length === 0) && (!Array.isArray(git.uncommittedChanges) || git.uncommittedChanges.length === 0) && (
-            <div className="text-xs text-gray-600">No git repository detected in project folder.</div>
-          )}
         </div>
       );
     }
@@ -909,7 +1101,11 @@
       const [identities, setIdentities] = useState([]);
       const [selectedIdentity, setSelectedIdentity] = useState('');
       const [principal, setPrincipal] = useState('');
-      const [cliInfo, setCliInfo] = useState({ cli: 'dfx', version: '' });
+      const [icpBalance, setIcpBalance] = useState(null);
+      const [cyclesBalance, setCyclesBalance] = useState(null);
+      const [mintModalOpen, setMintModalOpen] = useState(false);
+      const [topUpModal, setTopUpModal] = useState(null); // { canisterName }
+      const [cliInfo, setCliInfo] = useState({ cli: 'icp', version: '' });
       const [canisters, setCanisters] = useState([]);
       const [selectedCanisters, setSelectedCanisters] = useState([]);
       const [logs, setLogs] = useState([]);
@@ -919,6 +1115,7 @@
       const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
       const [replicaRunning, setReplicaRunning] = useState(false);
       const [canisterStatuses, setCanisterStatuses] = useState({});
+      const [topupHistory, setTopupHistory] = useState([]);
       const [tab, setTab] = useState('deploy'); // deploy, canisters
       const [loadingProject, setLoadingProject] = useState(false);
       const [configType, setConfigType] = useState('');
@@ -928,6 +1125,8 @@
       const [rightPanel, setRightPanel] = useState('summary'); // 'summary' | 'logs'
       const [deploySummary, setDeploySummary] = useState(null);
       const [summaryLoading, setSummaryLoading] = useState(false);
+      const [buildBeforeDeploy, setBuildBeforeDeploy] = useState(true);
+      const [recentProjects, setRecentProjects] = useState([]);
 
       const wsRef = useRef(null);
       const logEndRef = useRef(null);
@@ -945,7 +1144,34 @@
         } catch { setPrincipal(''); }
       }, []);
 
-      // Load identities + CLI info on mount
+      // Fetch cycles balance for current identity
+      const fetchCyclesBalance = useCallback(async () => {
+        try {
+          const params = network && network !== 'local' ? `?network=${network}` : '';
+          const data = await api.get(`/api/cycles/identity-balance${params}`);
+          setCyclesBalance(data.cycles || null);
+        } catch { setCyclesBalance(null); }
+      }, [network]);
+
+      // Fetch top-up history for current project
+      const fetchTopupHistory = useCallback(async () => {
+        if (!projectPath) return;
+        try {
+          const data = await api.post('/api/topup-history', { path: projectPath });
+          setTopupHistory(Array.isArray(data) ? data : []);
+        } catch { setTopupHistory([]); }
+      }, [projectPath]);
+
+      // Fetch ICP ledger balance for current identity
+      const fetchIcpBalance = useCallback(async () => {
+        try {
+          const params = network && network !== 'local' ? `?network=${network}` : '';
+          const data = await api.get(`/api/ledger/balance${params}`);
+          setIcpBalance(data.balance || null);
+        } catch { setIcpBalance(null); }
+      }, [network]);
+
+      // Load identities + CLI info + settings on mount
       useEffect(() => {
         api.get('/api/cli').then(setCliInfo).catch(() => {});
 
@@ -958,9 +1184,21 @@
         }).catch(() => {});
 
         fetchPrincipal();
+        fetchIcpBalance();
+        fetchCyclesBalance();
 
-        api.get('/api/dfx/status').then((data) => {
+        api.get('/api/replica/status').then((data) => {
           setReplicaRunning(data.running);
+        }).catch(() => {});
+
+        // Load saved settings
+        api.get('/api/settings').then((settings) => {
+          if (settings.recentProjects) setRecentProjects(settings.recentProjects);
+          if (settings.buildBeforeDeploy !== undefined) setBuildBeforeDeploy(settings.buildBeforeDeploy);
+          if (settings.lastNetwork) setNetwork(settings.lastNetwork);
+          if (settings.lastProject) {
+            setProjectPath(settings.lastProject);
+          }
         }).catch(() => {});
       }, []);
 
@@ -969,8 +1207,10 @@
       const isRemoteForNetwork = useCallback((canister, net) => {
         if (canister.pullType) return true;
         if (!canister.remote || !canister.remote.id) return false;
-        const networkKey = net === 'ic' ? 'ic' : 'local';
-        return !!canister.remote.id[networkKey];
+        // Check the exact network key first, then fall back to 'ic' for any non-local network
+        if (canister.remote.id[net]) return true;
+        if (net !== 'local' && canister.remote.id.ic) return true;
+        return false;
       }, []);
 
       // Filter to only owned (non-remote) canisters for current network
@@ -991,13 +1231,16 @@
           } else {
             setCanisters(data.canisters);
             setSelectedCanisters(data.canisters.filter((c) => !c.remote && !c.pullType).map((c) => c.name));
+            setCanisterStatuses({});
+            setDeploySummary(null);
             setProjectLoaded(true);
-            setConfigType(data.configType || 'dfx.json');
+            setConfigType(data.configType || 'icp.yaml');
+            fetchTopupHistory();
             // Set available networks from project config
             const nets = data.networks && data.networks.length > 0 ? data.networks : ['local', 'ic'];
             if (!nets.includes('local')) nets.unshift('local');
             setAvailableNetworks(nets);
-            setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'dfx.json'})` }]);
+            setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'icp.yaml'})` }]);
             setLogs((prev) => [
               ...prev,
               { type: 'info', text: `Found ${data.canisters.length} canister(s): ${data.canisters.map((c) => c.name).join(', ')}` },
@@ -1005,6 +1248,11 @@
             if (nets.length > 2) {
               setLogs((prev) => [...prev, { type: 'info', text: `Networks: ${nets.map((n) => n === 'ic' ? 'Production (ic)' : n).join(', ')}` }]);
             }
+            // Save to settings
+            api.post('/api/settings', { lastProject: path }).catch(() => {});
+            api.post('/api/settings/add-project', { path, name: path.split('/').pop() }).then((s) => {
+              if (s.recentProjects) setRecentProjects(s.recentProjects);
+            }).catch(() => {});
           }
         } catch (e) {
           setLogs((prev) => [...prev, { type: 'error', text: e.message }]);
@@ -1029,10 +1277,11 @@
         setSummaryLoading(false);
       }, [projectPath, projectLoaded, network, canisters]);
 
-      // Auto-fetch summary when project loads or network changes
+      // Auto-fetch summary and canister statuses when project loads or network changes
       useEffect(() => {
         if (projectLoaded && projectPath) {
           fetchDeploySummary();
+          fetchAllCanisterStatuses();
         }
       }, [projectLoaded, network]);
 
@@ -1052,15 +1301,17 @@
               action: 'deploy',
               path: projectPath,
               network,
-              canisters: selectedCanisters.length === canisters.length ? [] : selectedCanisters,
+              canisters: selectedCanisters.length === ownedCanisters.length ? [] : selectedCanisters,
               identity: selectedIdentity,
               mode: deployMode || undefined,
+              build: buildBeforeDeploy,
             })
           );
         };
 
         ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data);
+          let msg;
+          try { msg = JSON.parse(event.data); } catch { return; }
           if (msg.type === 'log') {
             setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
           } else if (msg.type === 'status') {
@@ -1076,6 +1327,7 @@
         ws.onerror = () => {
           setDeployStatus('error');
           setLogs((prev) => [...prev, { type: 'error', text: 'WebSocket connection failed' }]);
+          ws.close();
         };
       }, [projectPath, network, selectedCanisters, selectedIdentity, canisters, deployMode]);
 
@@ -1103,28 +1355,39 @@
       }, [projectPath, deployStatus, network, selectedCanisters, deployMode, doDeployNow]);
 
       const cancelDeploy = useCallback(() => {
-        if (wsRef.current) {
-          wsRef.current.send(JSON.stringify({ action: 'cancel' }));
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ action: 'cancel' }));
         }
       }, []);
 
+      const replicaWsRef = useRef(null);
       const startReplica = useCallback(() => {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(`${protocol}//${window.location.host}`);
+        replicaWsRef.current = ws;
         ws.onopen = () => {
           ws.send(JSON.stringify({ action: 'start-replica', path: projectPath }));
           setLogs((prev) => [...prev, { type: 'info', text: 'Starting local replica...' }]);
         };
         ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data);
+          let msg;
+          try { msg = JSON.parse(event.data); } catch { return; }
           if (msg.type === 'log') {
             setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
           } else if (msg.type === 'status') {
             if (msg.data === 'replica-running') {
               setReplicaRunning(true);
               setLogs((prev) => [...prev, { type: 'info', text: 'Local replica is running' }]);
+              ws.close();
+              replicaWsRef.current = null;
             }
           }
+        };
+        ws.onerror = () => {
+          setLogs((prev) => [...prev, { type: 'error', text: 'Failed to start replica' }]);
+          ws.close();
+          replicaWsRef.current = null;
         };
       }, [projectPath]);
 
@@ -1210,6 +1473,50 @@
         });
       }, [canisterAction]);
 
+      // Top up canister with cycles (called from TopUpModal)
+      const executeTopUp = useCallback(async (name, amount, source) => {
+        setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: true } }));
+        try {
+          const data = await api.post('/api/canister/top-up', { path: projectPath, canister: name, network, amount, source });
+          if (data.ok) {
+            setLogs((prev) => [...prev, { type: 'info', text: `Topped up ${name}: ${data.output}` }]);
+          } else {
+            setLogs((prev) => [...prev, { type: 'error', text: `Top-up failed: ${data.output}` }]);
+          }
+          await fetchCanisterStatus(name);
+          fetchTopupHistory();
+          fetchCyclesBalance();
+          fetchIcpBalance();
+        } catch (e) {
+          setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
+        }
+      }, [projectPath, network, fetchCanisterStatus, fetchTopupHistory, fetchCyclesBalance, fetchIcpBalance]);
+
+      // Add controller to canister
+      const addController = useCallback((name) => {
+        const principal = prompt('Enter principal ID to add as controller:');
+        if (!principal || !/^[a-z0-9-]+$/.test(principal)) {
+          if (principal) alert('Invalid principal ID format');
+          return;
+        }
+        setConfirmModal({
+          title: `Add controller to "${name}"`,
+          message: `Add ${principal.slice(0, 10)}...${principal.slice(-5)} as a controller of "${name}" on ${networkLabel}?`,
+          danger: false,
+          onConfirm: async () => {
+            setConfirmModal(null);
+            setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: true } }));
+            try {
+              await api.post('/api/canister/update-settings', { path: projectPath, canister: name, network, addController: principal });
+              setLogs((prev) => [...prev, { type: 'info', text: `Added controller to ${name}: ${principal}` }]);
+              await fetchCanisterStatus(name);
+            } catch (e) {
+              setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
+            }
+          },
+        });
+      }, [projectPath, network, networkLabel, fetchCanisterStatus]);
+
       const toggleCanister = (name) => {
         setSelectedCanisters((prev) =>
           prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name]
@@ -1240,6 +1547,34 @@
               </div>
               <div className="flex items-center gap-4">
                 <span className="text-[11px] text-gray-600 font-mono">{cliInfo.version?.split('\n')[0] || cliInfo.cli}</span>
+                {(icpBalance !== null || cyclesBalance !== null) && (
+                  <div className="flex items-center gap-2 px-2.5 py-1 bg-surface-800 border border-surface-700 rounded-lg">
+                    {icpBalance !== null && (
+                      <span className="text-[11px] font-semibold text-icp-400 font-mono" title={`${icpBalance} ICP`}>
+                        {parseFloat(icpBalance).toFixed(4)} ICP
+                      </span>
+                    )}
+                    {icpBalance !== null && cyclesBalance !== null && (
+                      <span className="text-gray-600">|</span>
+                    )}
+                    {cyclesBalance !== null && (
+                      <span className="text-[11px] font-semibold text-green-400 font-mono" title={`${Number(cyclesBalance).toLocaleString()} cycles`}>
+                        {(() => {
+                          const n = Number(cyclesBalance);
+                          if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+                          if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+                          if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+                          return n.toLocaleString();
+                        })()} cycles
+                      </span>
+                    )}
+                    <button
+                      onClick={() => setMintModalOpen(true)}
+                      className="text-[10px] px-1.5 py-0.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded hover:bg-icp-500/20 transition-colors font-medium"
+                      title="Mint cycles from ICP"
+                    >Mint</button>
+                  </div>
+                )}
                 {principal && (
                   <span className="text-[11px] text-gray-500 font-mono max-w-[140px] truncate" title={principal}>
                     {principal.slice(0, 8)}...{principal.slice(-5)}
@@ -1272,7 +1607,7 @@
                       setProjectPath(e.target.value);
                       setProjectLoaded(false);
                     }}
-                    onBlur={() => projectPath && loadProject(projectPath)}
+                    onBlur={() => projectPath && !projectLoaded && loadProject(projectPath)}
                     onKeyDown={(e) => e.key === 'Enter' && loadProject(projectPath)}
                     placeholder="/path/to/your/icp-project"
                     className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-icp-500 focus:ring-1 focus:ring-icp-500/50 font-mono text-sm"
@@ -1300,6 +1635,28 @@
                   {loadingProject ? <SpinnerIcon className="w-4 h-4" /> : 'Load'}
                 </button>
               </div>
+              {/* Recent projects */}
+              {recentProjects.length > 0 && (
+                <div className="flex items-center gap-2 mt-2">
+                  <span className="text-[11px] text-gray-600">Recent:</span>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {recentProjects.slice(0, 5).map((p) => (
+                      <button
+                        key={p.path}
+                        onClick={() => { setProjectPath(p.path); setProjectLoaded(false); loadProject(p.path); }}
+                        className={`px-2.5 py-1 text-[11px] rounded-lg transition-colors ${
+                          projectPath === p.path
+                            ? 'bg-icp-500/10 text-icp-400 border border-icp-500/20'
+                            : 'bg-surface-800 text-gray-500 border border-surface-700 hover:text-gray-300 hover:border-surface-600'
+                        }`}
+                        title={p.path}
+                      >
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Tabs + Network Toggle */}
@@ -1319,6 +1676,26 @@
                   </button>
                 ))}
               </div>
+              {/* Open Live App link */}
+              {network === 'ic' && (() => {
+                const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
+                const fs = fc && canisterStatuses[fc.name];
+                const cid = fs?.canisterId;
+                if (!cid) return null;
+                return (
+                  <a
+                    href={`https://${cid}.icp0.io`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-4 py-2 bg-icp-500/10 border border-icp-500/30 rounded-xl text-icp-400 hover:bg-icp-500/20 hover:border-icp-500/50 transition-colors text-sm font-medium"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                    </svg>
+                    Open Live App
+                  </a>
+                );
+              })()}
               {/* Global network selector */}
               <div className="flex items-center gap-2">
                 <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700">
@@ -1333,7 +1710,7 @@
                     return (
                       <div key={n} className="relative group">
                         <button
-                          onClick={() => setNetwork(n)}
+                          onClick={() => { setNetwork(n); api.post('/api/settings', { lastNetwork: n }).catch(() => {}); }}
                           className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
                             network === n ? activeStyle : 'text-gray-400 hover:text-white'
                           }`}
@@ -1346,7 +1723,7 @@
                               e.stopPropagation();
                               setConfirmModal({
                                 title: `Remove "${label}" network?`,
-                                message: `This will remove the "${n}" network from dfx.json. Any canisters deployed to this network will still exist on-chain but won't be managed from this project anymore. This does NOT delete the canisters themselves.`,
+                                message: `This will remove the "${n}" network from your project config. Any canisters deployed to this network will still exist on-chain but won't be managed from this project anymore. This does NOT delete the canisters themselves.`,
                                 danger: true,
                                 onConfirm: () => {
                                   setConfirmModal(null);
@@ -1354,7 +1731,7 @@
                                     if (data.ok) {
                                       setAvailableNetworks(data.networks);
                                       if (network === n) setNetwork('local');
-                                      setLogs((prev) => [...prev, { type: 'info', text: `Removed network "${n}" from dfx.json` }]);
+                                      setLogs((prev) => [...prev, { type: 'info', text: `Removed network "${n}" from project config` }]);
                                     } else {
                                       alert(data.error || 'Failed to remove network');
                                     }
@@ -1384,7 +1761,7 @@
                         if (data.ok) {
                           setAvailableNetworks(data.networks);
                           setNetwork(cleanName);
-                          setLogs((prev) => [...prev, { type: 'info', text: `Added network "${cleanName}" to dfx.json` }]);
+                          setLogs((prev) => [...prev, { type: 'info', text: `Added network "${cleanName}" to project config` }]);
                         } else {
                           alert(data.error || 'Failed to add network');
                         }
@@ -1402,22 +1779,6 @@
             </div>
 
             {/* Non-local network warning — shown on deploy tab */}
-            {network !== 'local' && tab === 'deploy' && (
-              <div className={`mb-4 flex items-start gap-2 p-3 rounded-xl ${
-                network === 'ic'
-                  ? 'bg-orange-500/10 border border-orange-500/20'
-                  : 'bg-yellow-500/10 border border-yellow-500/20'
-              }`}>
-                <svg className={`w-4 h-4 mt-0.5 shrink-0 ${network === 'ic' ? 'text-orange-400' : 'text-yellow-400'}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                </svg>
-                <p className={`text-xs ${network === 'ic' ? 'text-orange-300' : 'text-yellow-300'}`}>
-                  {network === 'ic'
-                    ? 'Deploying to PRODUCTION uses real cycles. Make sure your identity has sufficient balance.'
-                    : `Deploying to "${network}" network. This uses real cycles on mainnet infrastructure.`}
-                </p>
-              </div>
-            )}
 
             {tab === 'deploy' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1426,17 +1787,133 @@
                   {/* Identity */}
                   <div className="bg-surface-900 border border-surface-700 rounded-2xl p-5">
                     <label className="block text-sm font-medium text-gray-300 mb-3">Identity</label>
-                    <select
-                      value={selectedIdentity}
-                      onChange={(e) => { setSelectedIdentity(e.target.value); fetchPrincipal(); }}
-                      className="w-full bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-icp-500 text-sm appearance-none cursor-pointer"
-                    >
-                      {identities.map((id) => (
-                        <option key={id.name} value={id.name}>
-                          {id.name} {id.active ? '(current)' : ''}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="flex gap-2">
+                      <select
+                        value={selectedIdentity}
+                        onChange={async (e) => {
+                          const name = e.target.value;
+                          setSelectedIdentity(name);
+                          try {
+                            await api.post('/api/identity/use', { name });
+                            fetchPrincipal();
+                            fetchIcpBalance();
+                            fetchCyclesBalance();
+                          } catch (err) {
+                            console.error('Failed to switch identity:', err);
+                          }
+                        }}
+                        className="flex-1 bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-icp-500 text-sm appearance-none cursor-pointer"
+                      >
+                        {identities.map((id) => (
+                          <option key={id.name} value={id.name}>
+                            {id.name} {id.active ? '(current)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={async () => {
+                          const name = prompt('New identity name:');
+                          if (!name || !name.trim()) return;
+                          try {
+                            const resp = await api.post('/api/identity/new', { name: name.trim() });
+                            const data = await resp.json();
+                            if (data.seed) {
+                              alert('Identity created. Save your seed phrase:\\n\\n' + data.seed);
+                            }
+                            // Refresh identities and switch to new one
+                            const idResp = await api.get('/api/identities');
+                            const idData = await idResp.json();
+                            setIdentities(idData.identities || []);
+                            setSelectedIdentity(name.trim());
+                            await api.post('/api/identity/use', { name: name.trim() });
+                            fetchPrincipal();
+                            fetchIcpBalance();
+                            fetchCyclesBalance();
+                          } catch (err) {
+                            alert('Failed to create identity: ' + (err.message || err));
+                          }
+                        }}
+                        className="bg-surface-800 border border-surface-700 rounded-xl px-3 py-3 text-gray-400 hover:text-white hover:border-icp-500 transition-colors text-lg"
+                        title="Create new identity"
+                      >+</button>
+                    </div>
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={async () => {
+                          if (!selectedIdentity) return;
+                          const newName = prompt('Rename "' + selectedIdentity + '" to:', selectedIdentity);
+                          if (!newName || !newName.trim() || newName.trim() === selectedIdentity) return;
+                          try {
+                            const resp = await api.post('/api/identity/rename', { oldName: selectedIdentity, newName: newName.trim() });
+                            const data = await resp.json();
+                            if (data.error) { alert(data.error); return; }
+                            const idResp = await api.get('/api/identities');
+                            const idData = await idResp.json();
+                            setIdentities(idData.identities || []);
+                            setSelectedIdentity(newName.trim());
+                          } catch (err) {
+                            alert('Rename failed: ' + (err.message || err));
+                          }
+                        }}
+                        className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
+                        title="Rename identity"
+                      >Rename</button>
+                      <button
+                        onClick={async () => {
+                          if (!selectedIdentity) return;
+                          try {
+                            const resp = await api.post('/api/identity/export', { name: selectedIdentity });
+                            const data = await resp.json();
+                            if (data.error) { alert(data.error); return; }
+                            const blob = new Blob([data.pem], { type: 'text/plain' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = selectedIdentity + '.pem';
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          } catch (err) {
+                            alert('Export failed: ' + (err.message || err));
+                          }
+                        }}
+                        className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
+                        title="Export identity PEM"
+                      >Export</button>
+                      <button
+                        onClick={async () => {
+                          const input = document.createElement('input');
+                          input.type = 'file';
+                          input.accept = '.pem';
+                          input.onchange = async (e) => {
+                            const file = e.target.files[0];
+                            if (!file) return;
+                            const name = prompt('Name for imported identity:', file.name.replace('.pem', ''));
+                            if (!name || !name.trim()) return;
+                            const pem = await file.text();
+                            try {
+                              const resp = await api.post('/api/identity/import', { name: name.trim(), pem });
+                              const data = await resp.json();
+                              if (data.error) { alert(data.error); return; }
+                              // Refresh identities and switch
+                              const idResp = await api.get('/api/identities');
+                              const idData = await idResp.json();
+                              setIdentities(idData.identities || []);
+                              setSelectedIdentity(name.trim());
+                              await api.post('/api/identity/use', { name: name.trim() });
+                              fetchPrincipal();
+                              fetchIcpBalance();
+                              fetchCyclesBalance();
+                              alert('Identity "' + name.trim() + '" imported successfully.');
+                            } catch (err) {
+                              alert('Import failed: ' + (err.message || err));
+                            }
+                          };
+                          input.click();
+                        }}
+                        className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
+                        title="Import identity from PEM file"
+                      >Import</button>
+                    </div>
                     {principal && (
                       <p className="mt-2 text-[11px] text-gray-500 font-mono truncate" title={principal}>
                         {principal}
@@ -1478,6 +1955,20 @@
                         <p className="text-[11px] text-red-300">Reinstall erases all canister data permanently!</p>
                       </div>
                     )}
+                    {/* Build before deploy toggle */}
+                    <div className="mt-3 flex items-center justify-between p-2.5 bg-surface-800 rounded-xl">
+                      <span className="text-xs text-gray-400">Build before deploy</span>
+                      <button
+                        onClick={() => {
+                          const next = !buildBeforeDeploy;
+                          setBuildBeforeDeploy(next);
+                          api.post('/api/settings', { buildBeforeDeploy: next }).catch(() => {});
+                        }}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${buildBeforeDeploy ? 'bg-icp-500' : 'bg-surface-700'}`}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${buildBeforeDeploy ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                      </button>
+                    </div>
                   </div>
 
                   {/* Canisters */}
@@ -1542,7 +2033,7 @@
                         </button>
                         <button
                           onClick={async () => {
-                            await api.post('/api/dfx/stop');
+                            await api.post('/api/replica/stop');
                             setReplicaRunning(false);
                             setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]);
                           }}
@@ -1579,6 +2070,27 @@
                       </span>
                     )}
                   </button>
+
+                  {/* Open Live App */}
+                  {network === 'ic' && (() => {
+                    const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
+                    const fs = fc && canisterStatuses[fc.name];
+                    const cid = fs?.canisterId;
+                    if (!cid) return null;
+                    return (
+                      <a
+                        href={`https://${cid}.icp0.io`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-3 w-full flex items-center justify-center gap-2 py-3 bg-surface-900 border border-icp-500/30 rounded-2xl text-icp-400 hover:bg-icp-500/10 hover:border-icp-500/50 transition-colors font-medium text-sm"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                        </svg>
+                        Open Live App
+                      </a>
+                    );
+                  })()}
                 </div>
 
                 {/* Right: Summary + Logs */}
@@ -1621,7 +2133,7 @@
                           <div ref={logEndRef} />
                         </>
                       ) : (
-                        <DeploySummaryView summary={deploySummary} loading={summaryLoading} network={network} projectLoaded={projectLoaded} />
+                        <DeploySummaryView summary={deploySummary} loading={summaryLoading} network={network} projectLoaded={projectLoaded} canisterConfigs={canisters} />
                       )}
                     </div>
                   </div>
@@ -1672,7 +2184,7 @@
                     {canisters.map((c) => {
                       // Check if canister is remote/external on the current network
                       const isRemote = isRemoteForNetwork(c, network);
-                      const remoteId = c.remote?.id?.ic || c.remote?.id?.local || null;
+                      const remoteId = c.remote?.id?.[network] || c.remote?.id?.ic || c.remote?.id?.local || null;
 
                       if (isRemote) {
                         return (
@@ -1698,7 +2210,10 @@
                       const hasData = s && !s.error && !s.loading;
                       const isRunning = s?.runningStatus === 'Running';
                       const isStopped = s?.runningStatus === 'Stopped';
-                      const cycles = hasData && s.cycles ? BigInt(s.cycles) : null;
+                      let cycles = null;
+                      if (hasData && s.cycles) {
+                        try { cycles = BigInt(s.cycles.replace(/[^0-9]/g, '')); } catch {}
+                      }
 
                       const formatCycles = (c) => {
                         if (!c) return '—';
@@ -1731,14 +2246,19 @@
                       // Controller warnings
                       const controllers = hasData && s.controllers ? s.controllers : [];
                       const singleController = controllers.length === 1;
+                      const isMyCanister = !principal || controllers.length === 0 || controllers.includes(principal);
+                      const notMine = hasData && controllers.length > 0 && principal && !controllers.includes(principal);
 
                       return (
-                        <div key={c.name} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                        <div key={c.name} className={`bg-surface-900 border rounded-2xl overflow-hidden ${notMine ? 'border-surface-700/50 opacity-70' : 'border-surface-700'}`}>
                           {/* Card header */}
                           <div className="px-5 py-4 flex items-start justify-between">
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2">
                                 <span className="text-base font-semibold text-white">{c.name}</span>
+                                {notMine && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-gray-500/20 text-gray-400 border border-gray-500/20">Not your controller</span>
+                                )}
                                 <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
                                   c.type === 'motoko' ? 'bg-purple-500/20 text-purple-300' :
                                   c.type === 'rust' ? 'bg-orange-500/20 text-orange-300' :
@@ -1748,7 +2268,27 @@
                                 }`}>{c.type}</span>
                               </div>
                               {s?.canisterId && (
-                                <p className="text-xs text-gray-500 font-mono mt-1 truncate" title={s.canisterId}>{s.canisterId}</p>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <p className="text-xs text-gray-500 font-mono truncate" title={s.canisterId}>{s.canisterId}</p>
+                                  {network === 'ic' && (
+                                    <a
+                                      href={`https://${s.canisterId}.icp0.io`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-[10px] px-1.5 py-0.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded hover:bg-icp-500/20 transition-colors shrink-0"
+                                      title={`Open https://${s.canisterId}.icp0.io`}
+                                    >Open</a>
+                                  )}
+                                  {network === 'ic' && (
+                                    <a
+                                      href={`https://dashboard.internetcomputer.org/canister/${s.canisterId}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-[10px] px-1.5 py-0.5 bg-surface-800 text-gray-500 border border-surface-700 rounded hover:text-gray-300 transition-colors shrink-0"
+                                      title="View on ICP Dashboard"
+                                    >Dashboard</a>
+                                  )}
+                                </div>
                               )}
                               {!s?.canisterId && hasData && (
                                 <p className="text-xs text-gray-600 mt-1">No canister ID</p>
@@ -1788,12 +2328,13 @@
                                 </div>
                               </div>
                             ) : s?.error ? (
-                              s.error.includes('Cannot find canister id') ? (
-                                <div className="flex items-center gap-2 p-3 bg-surface-800 border border-surface-700 rounded-xl">
-                                  <svg className="w-4 h-4 text-gray-500 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
+                              (s.error.includes('Cannot find canister id') || s.error.includes('failed to lookup canister ID') || s.error.includes('could not find ID')) ? (
+                                <div className="p-4 bg-surface-800/50 border border-surface-700 rounded-xl text-center">
+                                  <svg className="w-6 h-6 text-gray-600 mx-auto mb-2" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
                                   </svg>
-                                  <p className="text-xs text-gray-500">Not deployed on {network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network}</p>
+                                  <p className="text-sm text-gray-400 font-medium">Not deployed</p>
+                                  <p className="text-[11px] text-gray-600 mt-1">This canister doesn't exist on {network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network} yet. Deploy it from the Deploy tab.</p>
                                 </div>
                               ) : (
                                 <div className="flex items-start gap-2 p-3 bg-red-500/5 border border-red-500/10 rounded-xl">
@@ -1808,22 +2349,55 @@
                             ) : null}
                           </div>
 
+                          {/* Top-up history */}
+                          {(() => {
+                            const canisterTopups = topupHistory
+                              .filter((t) => t.canister === c.name && t.network === network)
+                              .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                            if (canisterTopups.length === 0) return null;
+                            const recent = canisterTopups.slice(0, 3);
+                            return (
+                              <div className="px-5 pb-3">
+                                <span className="text-[11px] text-gray-500 font-medium">Top-up History</span>
+                                <div className="mt-1 space-y-1">
+                                  {recent.map((t, i) => (
+                                    <div key={i} className="flex items-center justify-between text-[11px]">
+                                      <span className="text-gray-500">{new Date(t.timestamp).toLocaleDateString()}</span>
+                                      <span className={t.success ? 'text-green-400' : 'text-red-400'}>
+                                        {t.success ? '+' : 'Failed '}{formatCycles(BigInt(t.amount))}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  {canisterTopups.length > 3 && (
+                                    <span className="text-[10px] text-gray-600">+{canisterTopups.length - 3} more</span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
+
                           {/* Warnings */}
-                          {hasData && (health === 'critical' || singleController || freezeWarning) && (
+                          {hasData && (health === 'critical' || (singleController && isMyCanister) || freezeWarning || notMine) && (
                             <div className="px-5 pb-3 space-y-1.5">
-                              {health === 'critical' && (
+                              {notMine && (
+                                <div className="flex items-center gap-2 p-2 bg-gray-500/10 border border-gray-500/20 rounded-lg">
+                                  <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+                                  <span className="text-[11px] text-gray-400">You are not a controller of this canister. Management actions are unavailable.</span>
+                                </div>
+                              )}
+                              {health === 'critical' && isMyCanister && (
                                 <div className="flex items-center gap-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
                                   <span className="text-[11px] text-red-300">Canister will freeze and become inaccessible if cycles reach zero</span>
                                 </div>
                               )}
-                              {singleController && network === 'ic' && (
+                              {singleController && isMyCanister && network === 'ic' && (
                                 <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
                                   <span className="text-[11px] text-yellow-300">Single controller — add a backup to prevent lockout</span>
                                 </div>
                               )}
-                              {freezeWarning && network === 'ic' && (
+                              {freezeWarning && isMyCanister && network === 'ic' && (
                                 <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
                                   <span className="text-[11px] text-yellow-300">Freezing threshold is {freezeDays} days — recommended 90+ for production</span>
@@ -1867,14 +2441,22 @@
                                 </div>
                               )}
                               {/* Lifecycle actions */}
-                              <div className="flex gap-2 mt-3">
-                                {isRunning && (
+                              <div className="flex flex-wrap gap-2 mt-3">
+                                {isMyCanister && isRunning && (
                                   <button onClick={() => stopCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 rounded-lg hover:bg-yellow-500/20 transition-colors">Stop</button>
                                 )}
-                                {isStopped && (
+                                {isMyCanister && isStopped && (
                                   <>
                                     <button onClick={() => startCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg hover:bg-green-500/20 transition-colors">Start</button>
                                     <button onClick={() => deleteCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors">Delete</button>
+                                  </>
+                                )}
+                                {isMyCanister && hasData && (
+                                  <>
+                                    <button onClick={() => setTopUpModal({ canisterName: c.name })} className="px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors">Top Up</button>
+                                    {singleController && (
+                                      <button onClick={() => addController(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded-lg hover:bg-purple-500/20 transition-colors">Add Controller</button>
+                                    )}
                                   </>
                                 )}
                                 <button onClick={() => fetchCanisterStatus(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:bg-surface-700 transition-colors ml-auto">Refresh</button>
@@ -1898,7 +2480,7 @@
                 projectPath={projectPath}
                 projectLoaded={projectLoaded}
                 network={network}
-                canisters={canisters}
+                canisters={ownedCanisters}
               />
             )}
           </main>
@@ -1927,6 +2509,23 @@
             network={network}
             onConfirm={() => { setReinstallModalOpen(false); doDeployNow(); }}
             onCancel={() => setReinstallModalOpen(false)}
+          />
+
+          <MintModal
+            isOpen={mintModalOpen}
+            onClose={() => setMintModalOpen(false)}
+            icpBalance={icpBalance}
+            cyclesBalance={cyclesBalance}
+            onMinted={() => { fetchIcpBalance(); fetchCyclesBalance(); }}
+          />
+
+          <TopUpModal
+            isOpen={!!topUpModal}
+            canisterName={topUpModal?.canisterName || ''}
+            onClose={() => setTopUpModal(null)}
+            icpBalance={icpBalance}
+            cyclesBalance={cyclesBalance}
+            onTopUp={executeTopUp}
           />
         </div>
       );

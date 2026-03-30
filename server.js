@@ -2,26 +2,77 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { spawn, spawnSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
+import { createHash } from 'crypto';
+import { gunzipSync } from 'zlib';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
+import { randomUUID } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(express.json());
+app.use(express.json({ limit: '50kb' }));
+
+// Security middleware — CORS + CSRF protection (must be before static files and routes)
+app.use((req, res, next) => {
+  // CORS — strict origin check (only allow same localhost:PORT)
+  const origin = req.headers.origin;
+  const allowed = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+  if (origin && !allowed.includes(origin)) {
+    return res.status(403).json({ error: 'Forbidden: cross-origin request blocked' });
+  }
+  res.setHeader('Access-Control-Allow-Origin', `http://localhost:${PORT}`);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Require X-Requested-With header on all API routes to prevent CSRF via form submissions
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'OPTIONS' && !req.headers['x-requested-with']) {
+    return res.status(403).json({ error: 'Forbidden: missing required header' });
+  }
+  next();
+});
+
+// Validate projectPath on all POST API routes that include a path in the body
+app.use('/api', (req, res, next) => {
+  if (req.method === 'POST' && req.body && req.body.path) {
+    try {
+      req.body.path = assertSafePath(req.body.path, 'Project path');
+    } catch (e) {
+      return res.status(403).json({ error: e.message });
+    }
+  }
+  next();
+});
+
 app.use(express.static(join(__dirname, 'public')));
 
 // ---------- CLI detection ----------
 
 // Validate inputs to prevent injection via argument values
-const SAFE_NAME_RE = /^[a-zA-Z0-9_\-]+$/;
+const SAFE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-]*$/;
 function assertSafeName(name, label = 'name') {
   if (!name || !SAFE_NAME_RE.test(name)) {
-    throw new Error(`Invalid ${label}: must be alphanumeric, hyphens, or underscores`);
+    throw new Error(`Invalid ${label}: must start with alphanumeric, then alphanumeric/hyphens/underscores`);
   }
+}
+
+// Validate project paths — must be within user's home directory
+const HOME = process.env.HOME;
+function assertSafePath(p, label = 'path') {
+  if (!p) throw new Error(`${label} required`);
+  const resolved = resolve(p);
+  if (!resolved.startsWith(HOME)) {
+    throw new Error(`${label} must be within your home directory`);
+  }
+  return resolved;
 }
 
 // Detect whether 'icp' or 'dfx' CLI is available
@@ -119,12 +170,49 @@ function recordDeploy(projectPath, { canister, network, moduleHash, deployMode }
     deployMode: deployMode || 'auto',
   };
 
-  const history = readDeployHistory(projectPath);
+  let history = readDeployHistory(projectPath);
   history.push(entry);
+  if (history.length > 500) history = history.slice(-500); // cap at 500 entries
   try {
     writeFileSync(join(projectPath, DEPLOY_HISTORY_FILE), JSON.stringify(history, null, 2));
   } catch {
     // Non-fatal — don't break deploy if history write fails
+  }
+  return entry;
+}
+
+// ---------- Top-up history ----------
+
+const TOPUP_HISTORY_FILE = '.topup-history.json';
+
+function readTopupHistory(projectPath) {
+  const histPath = join(projectPath, TOPUP_HISTORY_FILE);
+  if (!existsSync(histPath)) return [];
+  try {
+    const data = JSON.parse(readFileSync(histPath, 'utf-8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordTopup(projectPath, { canister, network, amount, success, output }) {
+  const entry = {
+    canister,
+    network,
+    amount: String(amount),
+    success,
+    output: output || '',
+    timestamp: new Date().toISOString(),
+  };
+
+  let history = readTopupHistory(projectPath);
+  history.push(entry);
+  if (history.length > 500) history = history.slice(-500);
+  try {
+    writeFileSync(join(projectPath, TOPUP_HISTORY_FILE), JSON.stringify(history, null, 2));
+  } catch {
+    // Non-fatal
   }
   return entry;
 }
@@ -202,6 +290,87 @@ app.post('/api/identity/use', (req, res) => {
   const result = runCliSync(cmd);
   if (!result.ok) return res.status(500).json({ error: result.data });
   res.json({ ok: true, identity: name });
+});
+
+// Create new identity
+app.post('/api/identity/new', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = CLI === 'icp'
+    ? ['identity', 'new', name, '--storage', 'plaintext']
+    : ['identity', 'new', name, '--storage-mode', 'plaintext'];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, name, seed: result.data });
+});
+
+// Rename identity
+app.post('/api/identity/rename', (req, res) => {
+  const { oldName, newName } = req.body;
+  if (!oldName || !newName) return res.status(400).json({ error: 'oldName and newName required' });
+  try {
+    assertSafeName(oldName, 'identity name');
+    assertSafeName(newName, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = ['identity', 'rename', oldName, newName];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, oldName, newName });
+});
+
+// Export identity PEM
+app.post('/api/identity/export', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = ['identity', 'export', name];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({ ok: true, pem: result.data });
+});
+
+// Import identity from PEM
+app.post('/api/identity/import', (req, res) => {
+  const { name, pem } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!pem) return res.status(400).json({ error: 'pem required' });
+  if (!pem.includes('-----BEGIN') || !pem.includes('-----END')) {
+    return res.status(400).json({ error: 'Invalid PEM format' });
+  }
+  if (pem.length > 10000) {
+    return res.status(400).json({ error: 'PEM data too large' });
+  }
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  // Write PEM to temp file, import, then delete
+  const tmpFile = join(tmpdir(), `icp-import-${randomUUID()}.pem`);
+  try {
+    writeFileSync(tmpFile, pem);
+    const cmd = CLI === 'icp'
+      ? ['identity', 'import', name, '--from-pem', tmpFile, '--storage', 'plaintext']
+      : ['identity', 'import', name, tmpFile, '--storage-mode', 'plaintext'];
+    const result = runCliSync(cmd);
+    if (!result.ok) return res.status(500).json({ error: result.data });
+    res.json({ ok: true, name });
+  } finally {
+    try { unlinkSync(tmpFile); } catch (_) {}
+  }
 });
 
 // Get principal for current identity
@@ -418,8 +587,8 @@ function parseCanisterStatus(raw) {
   const cyclesMatch = raw.match(/(?:Balance:\s*([\d_,]+)\s*Cycles|Cycles:\s*([\d_,]+))/i);
   parsed.cycles = cyclesMatch ? (cyclesMatch[1] || cyclesMatch[2]).replace(/[_,]/g, '') : null;
 
-  // dfx: "Memory Size: ..." — icp CLI: "Memory size: ..."
-  const memoryMatch = raw.match(/Memory\s*(?:allocation|[Ss]ize):\s*([\d_,]+)/i);
+  // dfx: "Memory Size: ..." — icp CLI: "Memory size: ..." (not "Memory allocation")
+  const memoryMatch = raw.match(/Memory\s*[Ss]ize:\s*([\d_,]+)/i);
   parsed.memoryBytes = memoryMatch ? memoryMatch[1].replace(/[_,]/g, '') : null;
 
   const moduleMatch = raw.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
@@ -457,7 +626,8 @@ app.post('/api/canister/status', (req, res) => {
   const { path: projectPath, canister, network } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
 
-  const netArgs = networkArgs(network);
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
   const result = runCliSync(['canister', 'status', canister, ...netArgs], projectPath);
   const idResult = getCanisterId(canister, netArgs, projectPath);
 
@@ -576,17 +746,42 @@ app.post('/api/canister/update-settings', (req, res) => {
   res.json({ ok: result.ok, output: result.data });
 });
 
-// Top up a canister with cycles
+// Top up a canister with cycles (source: 'cycles' = from cycles balance, 'icp' = mint first then top up)
 app.post('/api/canister/top-up', (req, res) => {
-  const { path: projectPath, canister, network, amount } = req.body;
+  const { path: projectPath, canister, network, amount, source } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
     return res.status(400).json({ error: 'amount must be a positive number of cycles' });
   }
-  // Both dfx and icp CLI: canister top-up <name> --amount <cycles>
+
+  // If source is 'icp', mint the cycles first
+  if (source === 'icp') {
+    const mintCmd = CLI === 'icp'
+      ? ['cycles', 'mint', '--cycles', String(amount), '-n', 'ic']
+      : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
+    const mintResult = runCliSync(mintCmd);
+    if (!mintResult.ok) {
+      if (projectPath) {
+        recordTopup(projectPath, { canister, network, amount, success: false, output: `Mint failed: ${mintResult.data}` });
+      }
+      return res.json({ ok: false, output: `Mint failed: ${mintResult.data}` });
+    }
+  }
+
+  // Top up from cycles balance
   const args = ['canister', 'top-up', canister, '--amount', String(amount), ...networkArgs(network)];
   const result = runCliSync(args, projectPath);
+  if (projectPath) {
+    recordTopup(projectPath, { canister, network, amount, success: result.ok, output: result.data, source: source || 'cycles' });
+  }
   res.json({ ok: result.ok, output: result.data });
+});
+
+// Get top-up history for a project
+app.post('/api/topup-history', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  res.json(readTopupHistory(projectPath));
 });
 
 // ---------- Canister snapshots ----------
@@ -661,6 +856,7 @@ app.post('/api/canister/snapshot/download', (req, res) => {
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (!snapshotId || !/^[0-9a-f]+$/i.test(snapshotId)) return res.status(400).json({ error: 'Invalid snapshot ID' });
   if (!dir) return res.status(400).json({ error: 'Directory path required' });
+  try { assertSafePath(dir, 'Snapshot directory'); } catch (e) { return res.status(403).json({ error: e.message }); }
 
   const args = ['canister', 'snapshot', 'download', canister, snapshotId, '--dir', dir, ...networkArgs(network)];
   // Downloading can take a long time for large canisters
@@ -683,6 +879,7 @@ app.post('/api/canister/snapshot/upload', (req, res) => {
   const { path: projectPath, canister, network, dir, replace } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (!dir) return res.status(400).json({ error: 'Directory path required' });
+  try { assertSafePath(dir, 'Snapshot directory'); } catch (e) { return res.status(403).json({ error: e.message }); }
 
   const args = ['canister', 'snapshot', 'upload', canister, '--dir', dir, ...networkArgs(network)];
   if (replace && /^[0-9a-f]+$/i.test(replace)) {
@@ -733,26 +930,7 @@ app.post('/api/deploy/summary', async (req, res) => {
   if (!projectPath) return res.status(400).json({ error: 'path required' });
 
   const netArgs = networkArgs(network);
-  const summary = { canisters: {}, git: { recentCommits: [], uncommittedChanges: [], statusShort: [], diffStat: null } };
-
-  // Git info
-  const gitLogResult = spawnSync('git', ['log', '--oneline', '-10'], {
-    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
-  });
-  const gitStatusResult = spawnSync('git', ['diff', '--stat'], {
-    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
-  });
-  const gitUntrackedResult = spawnSync('git', ['status', '--short'], {
-    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
-  });
-
-  if (gitLogResult.status === 0) {
-    summary.git = {
-      recentCommits: gitLogResult.stdout.trim().split('\n').filter(Boolean),
-      uncommittedChanges: (gitStatusResult.stdout || '').trim() ? (gitStatusResult.stdout || '').trim().split('\n') : [],
-      statusShort: (gitUntrackedResult.stdout || '').trim() ? (gitUntrackedResult.stdout || '').trim().split('\n') : [],
-    };
-  }
+  const summary = { canisters: {} };
 
   // Per-canister: deployed module hash vs local WASM hash
   const names = canisterNames || [];
@@ -772,32 +950,61 @@ app.post('/api/deploy/summary', async (req, res) => {
     if (entry.canisterId) {
       entry.deployed = true;
 
-      // Get deployed module hash via canister info
-      const infoResult = runCliSync(['canister', 'info', name, ...netArgs], projectPath);
-      if (infoResult.ok) {
-        const hashMatch = infoResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
-        entry.moduleHash = hashMatch ? hashMatch[1] : null;
-      }
-
-      // Get deployed status
+      // Get deployed status + module hash from canister status (works for both icp and dfx)
       const statusResult = runCliSync(['canister', 'status', name, ...netArgs], projectPath);
       if (statusResult.ok) {
         const statusMatch = statusResult.data.match(/Status:\s*(\w+)/i);
         entry.status = statusMatch ? statusMatch[1] : null;
+        const hashMatch = statusResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+        entry.moduleHash = hashMatch ? hashMatch[1] : null;
+      }
+
+      // Fallback: try canister info (dfx only, icp CLI doesn't have this)
+      if (!entry.moduleHash && CLI !== 'icp') {
+        const infoResult = runCliSync(['canister', 'info', name, ...netArgs], projectPath);
+        if (infoResult.ok) {
+          const hashMatch = infoResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+          entry.moduleHash = hashMatch ? hashMatch[1] : null;
+        }
       }
     }
 
-    // Check if local WASM exists (built artifacts)
+    // Check if local WASM exists and compute hash for comparison
     // dfx builds to .dfx/<network>/canisters/<name>/<name>.wasm
+    // icp builds to .icp/cache/<name>/<name>.wasm or target/wasm32-.../release/<name>.wasm
     const localNet = network === 'ic' ? 'ic' : 'local';
-    const wasmPath = join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`);
-    const wasmGzPath = wasmPath + '.gz';
-    if (existsSync(wasmPath)) {
-      entry.localWasm = 'exists';
-    } else if (existsSync(wasmGzPath)) {
-      entry.localWasm = 'exists (compressed)';
+    const wasmCandidates = [
+      join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`),
+      join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm.gz`),
+      join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm`),
+      join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm.gz`),
+      join(projectPath, '.icp', 'cache', name, `${name}.wasm`),
+      join(projectPath, '.icp', 'cache', name, `${name}.wasm.gz`),
+    ];
+    let localWasmPath = null;
+    for (const wp of wasmCandidates) {
+      if (existsSync(wp)) { localWasmPath = wp; break; }
+    }
+    if (localWasmPath) {
+      entry.localWasmExists = true;
+      try {
+        let wasmBytes = readFileSync(localWasmPath);
+        if (localWasmPath.endsWith('.gz')) {
+          wasmBytes = gunzipSync(wasmBytes);
+        }
+        const hash = createHash('sha256').update(wasmBytes).digest('hex');
+        entry.localWasmHash = '0x' + hash;
+      } catch { entry.localWasmHash = null; }
     } else {
-      entry.localWasm = null;
+      entry.localWasmExists = false;
+      entry.localWasmHash = null;
+    }
+
+    // Compare local vs deployed
+    if (entry.moduleHash && entry.localWasmHash) {
+      entry.hashMatch = entry.moduleHash === entry.localWasmHash;
+    } else {
+      entry.hashMatch = null; // can't determine
     }
 
     summary.canisters[name] = entry;
@@ -816,6 +1023,83 @@ app.post('/api/deploy/summary', async (req, res) => {
   }
 
   res.json(summary);
+});
+
+// Build canisters before deploy
+app.post('/api/build', (req, res) => {
+  const { path: projectPath, canisterNames } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  const args = ['build'];
+  if (canisterNames && canisterNames.length > 0) {
+    for (const name of canisterNames) {
+      try { assertSafeName(name, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    }
+    args.push(...canisterNames);
+  }
+
+  // Build can take a while
+  const result = spawnSync(CLI, args, {
+    cwd: projectPath,
+    encoding: 'utf-8',
+    timeout: 300000, // 5 min
+    env: { ...process.env, HOME: process.env.HOME },
+  });
+
+  if (result.status === 0) {
+    res.json({ ok: true, output: (result.stdout || '').trim() + '\n' + (result.stderr || '').trim() });
+  } else {
+    res.json({ ok: false, error: (result.stderr || result.stdout || '').trim() });
+  }
+});
+
+// Get ICP ledger balance for current identity
+app.get('/api/ledger/balance', (req, res) => {
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  const netArgs = network && network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // Output format: "Balance: 12.34567890 ICP" or just a number
+  const match = result.data.match(/([\d.]+)\s*ICP/i);
+  const balance = match ? match[1] : result.data.trim();
+  res.json({ balance, raw: result.data });
+});
+
+// Get cycles balance for current identity
+app.get('/api/cycles/identity-balance', (req, res) => {
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  const netArgs = network && network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // icp CLI: "Balance: 314_540_000_000 cycles"
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  const cycles = match ? match[1].replace(/[_,]/g, '') : result.data.trim();
+  res.json({ cycles, raw: result.data });
+});
+
+// Mint cycles from ICP
+app.post('/api/cycles/mint', (req, res) => {
+  const { amount, unit } = req.body; // unit: 'icp' or 'cycles'
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number' });
+  }
+  if (!unit || !['icp', 'cycles'].includes(unit)) {
+    return res.status(400).json({ error: 'unit must be "icp" or "cycles"' });
+  }
+  const flag = unit === 'icp' ? '--icp' : '--cycles';
+  const cmd = CLI === 'icp'
+    ? ['cycles', 'mint', flag, String(amount), '-n', 'ic']
+    : ['ledger', 'fabricate-cycles', '--amount', String(amount)]; // dfx fallback
+  const result = runCliSync(cmd);
+  res.json({ ok: result.ok, output: result.data });
 });
 
 // Get wallet balance (dfx-specific; icp CLI may not support wallet subcommand)
@@ -841,14 +1125,14 @@ app.post('/api/cycles/balance', (req, res) => {
 });
 
 // Check if local replica is running
-app.get('/api/dfx/status', (_req, res) => {
+app.get('/api/replica/status', (_req, res) => {
   const cmd = CLI === 'icp' ? ['network', 'ping'] : ['ping'];
   const result = runCliSync(cmd);
   res.json({ running: result.ok, cli: CLI });
 });
 
 // Start local replica
-app.post('/api/dfx/start', (req, res) => {
+app.post('/api/replica/start', (req, res) => {
   const { path: projectPath, clean } = req.body;
   const args = CLI === 'icp'
     ? ['network', 'start', '-d', ...(clean ? ['--clean'] : [])]
@@ -872,7 +1156,7 @@ app.post('/api/dfx/start', (req, res) => {
 });
 
 // Stop local replica
-app.post('/api/dfx/stop', (_req, res) => {
+app.post('/api/replica/stop', (_req, res) => {
   const args = CLI === 'icp' ? ['network', 'stop'] : ['stop'];
   const result = runCliSync(args);
   res.json({ ok: result.ok, output: result.data });
@@ -881,33 +1165,51 @@ app.post('/api/dfx/stop', (_req, res) => {
 // Browse directory (for folder picker)
 app.post('/api/browse', (req, res) => {
   const { path: dirPath } = req.body;
-  const target = dirPath || process.env.HOME;
+  const home = process.env.HOME;
+  const target = dirPath || home;
+
+  // Restrict browsing to home directory and below
+  const resolved = resolve(target);
+  if (!resolved.startsWith(home)) {
+    return res.status(403).json({ error: 'Cannot browse outside home directory' });
+  }
 
   try {
-    const entries = readdirSync(target, { withFileTypes: true })
+    const entries = readdirSync(resolved, { withFileTypes: true })
       .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
       .map((e) => ({
         name: e.name,
-        path: join(target, e.name),
-        hasDfxJson: existsSync(join(target, e.name, 'dfx.json')) || existsSync(join(target, e.name, 'icp.yaml')),
+        path: join(resolved, e.name),
+        hasIcpYaml: existsSync(join(resolved, e.name, 'icp.yaml')),
+        hasDfxJson: existsSync(join(resolved, e.name, 'dfx.json')),
+        isIcpProject: existsSync(join(resolved, e.name, 'icp.yaml')) || existsSync(join(resolved, e.name, 'dfx.json')),
       }))
       .sort((a, b) => {
-        // dfx projects first
-        if (a.hasDfxJson && !b.hasDfxJson) return -1;
-        if (!a.hasDfxJson && b.hasDfxJson) return 1;
+        // ICP projects first
+        if (a.isIcpProject && !b.isIcpProject) return -1;
+        if (!a.isIcpProject && b.isIcpProject) return 1;
         return a.name.localeCompare(b.name);
       });
 
-    const parentPath = dirname(target);
-    res.json({ current: target, parent: parentPath, entries });
+    const parentPath = dirname(resolved);
+    // Don't let parent go above home
+    const safeParent = parentPath.startsWith(home) ? parentPath : home;
+    res.json({ current: resolved, parent: safeParent, entries });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: 'Failed to browse directory' });
   }
 });
 
 // ---------- WebSocket: live deploy ----------
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // Verify WebSocket origin
+  const origin = req.headers.origin || '';
+  if (origin && !origin.match(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/)) {
+    ws.close(1008, 'Forbidden: invalid origin');
+    return;
+  }
+
   ws.on('message', (raw) => {
     let msg;
     try {
@@ -924,6 +1226,10 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', data: 'Project path required' }));
         return;
       }
+      try { assertSafePath(projectPath); } catch (e) {
+        ws.send(JSON.stringify({ type: 'error', data: e.message }));
+        return;
+      }
 
       // Switch identity if specified
       if (identity) {
@@ -938,6 +1244,32 @@ wss.on('connection', (ws) => {
           return;
         }
         ws.send(JSON.stringify({ type: 'log', data: `Switched to identity: ${identity}` }));
+      }
+
+      // Optional: build before deploy
+      if (msg.build) {
+        ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} build ${(canisters || []).join(' ')}` }));
+        ws.send(JSON.stringify({ type: 'status', data: 'building' }));
+
+        const buildArgs = ['build'];
+        if (canisters && canisters.length > 0) buildArgs.push(...canisters);
+
+        const buildResult = spawnSync(CLI, buildArgs, {
+          cwd: projectPath,
+          encoding: 'utf-8',
+          timeout: 300000,
+          env: { ...process.env, HOME: process.env.HOME },
+        });
+
+        if (buildResult.stdout) ws.send(JSON.stringify({ type: 'log', data: buildResult.stdout }));
+        if (buildResult.stderr) ws.send(JSON.stringify({ type: 'log', data: buildResult.stderr }));
+
+        if (buildResult.status !== 0) {
+          ws.send(JSON.stringify({ type: 'log', data: '\n--- Build failed ---' }));
+          ws.send(JSON.stringify({ type: 'status', data: 'error' }));
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'log', data: '--- Build successful ---\n' }));
       }
 
       // Build deploy command
@@ -1068,10 +1400,63 @@ wss.on('connection', (ws) => {
   });
 });
 
+// ---------- Settings persistence ----------
+
+const SETTINGS_FILE = join(process.env.HOME, '.canister-panel-settings.json');
+
+function readSettings() {
+  if (!existsSync(SETTINGS_FILE)) return {};
+  try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')); } catch { return {}; }
+}
+
+function writeSettings(settings) {
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+app.get('/api/settings', (_req, res) => {
+  res.json(readSettings());
+});
+
+app.post('/api/settings', (req, res) => {
+  const ALLOWED_KEYS = ['lastProject', 'lastNetwork', 'buildBeforeDeploy', 'recentProjects'];
+  const current = readSettings();
+  const filtered = Object.fromEntries(
+    Object.entries(req.body).filter(([k]) => ALLOWED_KEYS.includes(k))
+  );
+  const updated = { ...current, ...filtered };
+  writeSettings(updated);
+  res.json(updated);
+});
+
+// Recent projects list
+app.post('/api/settings/add-project', (req, res) => {
+  const { path: projectPath, name } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  const settings = readSettings();
+  if (!settings.recentProjects) settings.recentProjects = [];
+
+  // Remove if already exists, add to front
+  settings.recentProjects = settings.recentProjects.filter(p => p.path !== projectPath);
+  settings.recentProjects.unshift({ path: projectPath, name: name || projectPath.split('/').pop(), lastUsed: new Date().toISOString() });
+
+  // Keep max 10
+  settings.recentProjects = settings.recentProjects.slice(0, 10);
+
+  writeSettings(settings);
+  res.json(settings);
+});
+
+// Global error handler — catch unhandled route errors, never leak stack traces
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 // ---------- start ----------
 
 const PORT = process.env.PORT || 3456;
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  ICP Deploy Dashboard`);
   console.log(`  --------------------`);
   console.log(`  Open http://localhost:${PORT}\n`);
