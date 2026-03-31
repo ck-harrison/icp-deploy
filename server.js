@@ -75,7 +75,13 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.use(express.static(join(__dirname, 'public')));
+app.use(express.static(join(__dirname, 'public'), {
+  etag: false,
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+  },
+}));
 
 // ---------- CLI detection ----------
 
@@ -1059,15 +1065,16 @@ app.post('/api/deploy/summary', async (req, res) => {
     }
 
     // Check if local WASM exists and compute hash for comparison
-    // icp CLI builds to .icp/cache/artifacts/<name> (no extension, may be gzip)
-    // dfx builds to .dfx/<network>/canisters/<name>/<name>.wasm[.gz]
+    // Prioritize .dfx/<network>/ paths — these are the final WASM with metadata/candid embedded,
+    // which is what actually gets deployed to chain. The .icp/cache/artifacts/ path is an
+    // intermediate build artifact BEFORE post-processing, so its hash won't match chain.
     const localNet = network === 'ic' ? 'ic' : 'local';
     const wasmCandidates = [
-      join(projectPath, '.icp', 'cache', 'artifacts', name),
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm.gz`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm.gz`),
+      join(projectPath, '.icp', 'cache', 'artifacts', name),
     ];
     let localWasmPath = null;
     for (const wp of wasmCandidates) {
@@ -1456,16 +1463,18 @@ wss.on('connection', (ws, req) => {
         env: { ...process.env, HOME: process.env.HOME },
       });
 
+      let deployOutput = '';
+
       child.stdout.on('data', (chunk) => {
-        ws.send(
-          JSON.stringify({ type: 'log', data: chunk.toString() })
-        );
+        const text = chunk.toString();
+        deployOutput += text;
+        ws.send(JSON.stringify({ type: 'log', data: text }));
       });
 
       child.stderr.on('data', (chunk) => {
-        ws.send(
-          JSON.stringify({ type: 'log', data: chunk.toString() })
-        );
+        const text = chunk.toString();
+        deployOutput += text;
+        ws.send(JSON.stringify({ type: 'log', data: text }));
       });
 
       child.on('close', (code) => {
@@ -1474,31 +1483,69 @@ wss.on('connection', (ws, req) => {
           const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
           for (const name of deployedNames) {
             // Fetch the module hash of the just-deployed canister
-            const infoResult = runCliSync(['canister', 'info', name, ...networkArgs(network)], projectPath);
+            const statusResult = runCliSync(['canister', 'status', name, ...networkArgs(network)], projectPath);
             let moduleHash = null;
-            if (infoResult.ok) {
-              const hashMatch = infoResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+            if (statusResult.ok) {
+              const hashMatch = statusResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
               moduleHash = hashMatch ? hashMatch[1] : null;
             }
             const entry = recordDeploy(projectPath, { canister: name, network, moduleHash, deployMode: mode || 'auto' });
             ws.send(JSON.stringify({ type: 'log', data: `Recorded deploy: ${name} @ ${entry.gitCommit || 'unknown'} (${entry.gitBranch || 'unknown'})` }));
           }
         }
-        ws.send(
-          JSON.stringify({
-            type: 'status',
-            data: code === 0 ? 'success' : 'error',
-          })
-        );
-        ws.send(
-          JSON.stringify({
-            type: 'log',
-            data:
-              code === 0
-                ? '\n--- Deploy completed successfully ---'
-                : `\n--- Deploy failed (exit code ${code}) ---`,
-          })
-        );
+
+        // Parse deploy output to give clear per-canister results
+        let finalStatus = code === 0 ? 'success' : 'error';
+
+        // Determine which canisters succeeded/failed
+        const failedSync = [...deployOutput.matchAll(/Failed to sync canister '(\w+)'/g)].map(m => m[1]);
+        const failedInstall = [...deployOutput.matchAll(/Failed to install.*?'(\w+)'/g)].map(m => m[1]);
+        const allFailed = [...new Set([...failedSync, ...failedInstall])];
+        const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
+        const succeeded = deployedNames.filter(n => !allFailed.includes(n));
+
+        if (code !== 0) {
+          const cyclesMatch = deployOutput.match(/Insufficient cycles.*?Requested:\s*([\d_]+).*?available.*?:\s*([\d_]+)/s);
+          const moduleMatch = deployOutput.match(/Cannot install.*already has.*module/i);
+
+          if (failedSync.length > 0 && succeeded.length > 0) {
+            // Partial success — some canisters deployed, asset sync failed for others
+            finalStatus = 'success';
+          }
+
+          // Show per-canister results
+          ws.send(JSON.stringify({ type: 'log', data: '\n--- Deploy Results ---' }));
+          for (const name of succeeded) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✓ ${name} — deployed successfully` }));
+          }
+          for (const name of failedSync) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✗ ${name} — WASM installed but asset sync failed` }));
+            const assetMatch = deployOutput.match(new RegExp(`Failed to sync canister '${name}'[\\s\\S]*?(?:Failed to get asset properties for\\s+(\\S+)|failed to synchronize asset canister:\\s*(.+?)(?:\\n|$))`));
+            if (assetMatch) {
+              const detail = assetMatch[1] ? `Problem file: ${assetMatch[1]}` : (assetMatch[2] || '');
+              if (detail) ws.send(JSON.stringify({ type: 'log', data: `    ${detail}` }));
+            }
+            ws.send(JSON.stringify({ type: 'log', data: `    Try: icp deploy ${name} ${networkArgs(network).join(' ')}` }));
+          }
+          for (const name of failedInstall) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✗ ${name} — failed to install` }));
+          }
+
+          if (cyclesMatch) {
+            ws.send(JSON.stringify({ type: 'log', data: `\nHint: Not enough cycles. Run "icp cycles mint" to convert ICP to cycles.` }));
+          } else if (moduleMatch) {
+            ws.send(JSON.stringify({ type: 'log', data: `\nHint: Canister already has code installed. Use "Upgrade" or "Reinstall" deploy mode instead of "Install".` }));
+          }
+        }
+
+        const finalMessage = code === 0
+          ? '\n--- Deploy completed successfully ---'
+          : finalStatus === 'success'
+            ? '\n--- Deploy completed with warnings ---'
+            : `\n--- Deploy failed ---`;
+
+        ws.send(JSON.stringify({ type: 'status', data: finalStatus }));
+        ws.send(JSON.stringify({ type: 'log', data: finalMessage }));
       });
 
       child.on('error', (err) => {

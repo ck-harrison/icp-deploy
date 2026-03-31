@@ -1273,6 +1273,7 @@
       const [topupHistory, setTopupHistory] = useState([]);
       const [tab, setTab] = useState('deploy'); // deploy, canisters
       const [loadingProject, setLoadingProject] = useState(false);
+      const [projectLoadCount, setProjectLoadCount] = useState(0);
       const [configType, setConfigType] = useState('');
       const [confirmModal, setConfirmModal] = useState(null); // { title, message, danger, onConfirm }
       const [reinstallModalOpen, setReinstallModalOpen] = useState(false);
@@ -1373,10 +1374,18 @@
       // Filter to only owned (non-remote) canisters for current network
       const ownedCanisters = canisters.filter((c) => !isRemoteForNetwork(c, network));
 
+      // Reset selected canisters when network or canister list changes
+      useEffect(() => {
+        setSelectedCanisters(ownedCanisters.map((c) => c.name));
+      }, [network, canisters]);
+
       // Human-readable network label
       const networkLabel = network === 'ic' ? 'Production' : network === 'local' ? 'Local' : network.charAt(0).toUpperCase() + network.slice(1);
 
       // Load project
+      const networkRef = React.useRef(network);
+      networkRef.current = network;
+
       const loadProject = useCallback(async (path) => {
         if (!path) return;
         setLoadingProject(true);
@@ -1387,7 +1396,6 @@
             setProjectLoaded(false);
           } else {
             setCanisters(data.canisters);
-            setSelectedCanisters(data.canisters.filter((c) => !c.remote && !c.pullType).map((c) => c.name));
             setCanisterStatuses({});
             setDeploySummary(null);
             setProjectLoaded(true);
@@ -1397,10 +1405,11 @@
             const nets = data.networks && data.networks.length > 0 ? data.networks : ['local', 'ic'];
             if (!nets.includes('local')) nets.unshift('local');
             setAvailableNetworks(nets);
+            const owned = data.canisters.filter((c) => !isRemoteForNetwork(c, networkRef.current));
             setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'icp.yaml'})` }]);
             setLogs((prev) => [
               ...prev,
-              { type: 'info', text: `Found ${data.canisters.length} canister(s): ${data.canisters.map((c) => c.name).join(', ')}` },
+              { type: 'info', text: `Found ${owned.length} canister(s): ${owned.map((c) => c.name).join(', ')}` },
             ]);
             if (nets.length > 2) {
               setLogs((prev) => [...prev, { type: 'info', text: `Networks: ${nets.map((n) => n === 'ic' ? 'Production (ic)' : n).join(', ')}` }]);
@@ -1410,6 +1419,8 @@
             api.post('/api/settings/add-project', { path, name: path.split('/').pop() }).then((s) => {
               if (s.recentProjects) setRecentProjects(s.recentProjects);
             }).catch(() => {});
+            // Bump refresh counter so useEffect re-fetches tab data
+            setProjectLoadCount((c) => c + 1);
           }
         } catch (e) {
           setLogs((prev) => [...prev, { type: 'error', text: e.message }]);
@@ -1434,13 +1445,16 @@
         setSummaryLoading(false);
       }, [projectPath, projectLoaded, network, canisters]);
 
-      // Auto-fetch summary and canister statuses when project loads or network changes
+      // Auto-fetch data when project loads, network changes, or tab changes
       useEffect(() => {
         if (projectLoaded && projectPath) {
-          fetchDeploySummary();
-          fetchAllCanisterStatuses();
+          if (tab === 'deploy') {
+            fetchDeploySummary();
+          } else if (tab === 'canisters') {
+            fetchAllCanisterStatuses();
+          }
         }
-      }, [projectLoaded, network]);
+      }, [projectLoaded, network, tab, projectLoadCount]);
 
       // Deploy (internal — called after confirmation)
       const doDeployNow = useCallback(() => {
@@ -1458,7 +1472,7 @@
               action: 'deploy',
               path: projectPath,
               network,
-              canisters: selectedCanisters.length === ownedCanisters.length ? [] : selectedCanisters,
+              canisters: selectedCanisters,
               identity: selectedIdentity,
               mode: deployMode || undefined,
               build: buildBeforeDeploy,
@@ -1475,6 +1489,8 @@
             if (['success', 'error', 'cancelled'].includes(msg.data)) {
               setDeployStatus(msg.data);
               ws.close();
+              // Auto-refresh deploy summary after deploy completes
+              fetchDeploySummary();
             }
           } else if (msg.type === 'error') {
             setLogs((prev) => [...prev, { type: 'error', text: msg.data }]);
@@ -1568,13 +1584,14 @@
       }, [projectPath, network]);
 
       const fetchAllCanisterStatuses = useCallback(async () => {
-        if (!projectLoaded || canisters.length === 0) return;
+        const owned = canisters.filter((c) => !isRemoteForNetwork(c, network));
+        if (!projectLoaded || owned.length === 0) return;
         setLoadingStatuses(true);
         try {
           const data = await api.post('/api/canisters/status-all', {
             path: projectPath,
             network,
-            canisterNames: canisters.map((c) => c.name),
+            canisterNames: owned.map((c) => c.name),
           });
           setCanisterStatuses(data);
           // Fetch cycles ledger balances for canisters that have IDs (non-local only)
@@ -1593,12 +1610,11 @@
         setLoadingStatuses(false);
       }, [projectPath, network, projectLoaded, canisters]);
 
-      // Auto-fetch statuses when switching to canisters tab or changing network
+      // Clear cached statuses when switching to canisters tab or changing network
       useEffect(() => {
-        if (tab === 'canisters' && projectLoaded && canisters.length > 0) {
+        if (tab === 'canisters') {
           setCanisterStatuses({});
           setCyclesLedgerBalances({});
-          fetchAllCanisterStatuses();
         }
       }, [tab, network]);
 
@@ -1854,8 +1870,9 @@
               {/* Open Live App link */}
               {network === 'ic' && (() => {
                 const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
-                const fs = fc && canisterStatuses[fc.name];
-                const cid = fs?.canisterId;
+                if (!fc) return null;
+                // Try deploy summary first (available on Deploy tab), then canister statuses
+                const cid = deploySummary?.canisters?.[fc.name]?.canisterId || canisterStatuses[fc.name]?.canisterId;
                 if (!cid || !isValidCanisterId(cid)) return null;
                 return (
                   <a
@@ -2101,7 +2118,7 @@
                     <label className="block text-sm font-medium text-gray-300 mb-3">Deploy Mode</label>
                     <div className="grid grid-cols-2 gap-2">
                       {[
-                        { value: '', label: 'Auto', desc: 'Install new, upgrade existing' },
+                        { value: '', label: 'Auto', desc: 'Upgrade existing, create new' },
                         { value: 'upgrade', label: 'Upgrade', desc: 'Preserve canister state' },
                         { value: 'reinstall', label: 'Reinstall', desc: 'Wipes all state' },
                         { value: 'install', label: 'Install', desc: 'New canisters only' },
@@ -2249,8 +2266,8 @@
                   {/* Open Live App */}
                   {network === 'ic' && (() => {
                     const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
-                    const fs = fc && canisterStatuses[fc.name];
-                    const cid = fs?.canisterId;
+                    if (!fc) return null;
+                    const cid = deploySummary?.canisters?.[fc.name]?.canisterId || canisterStatuses[fc.name]?.canisterId;
                     if (!cid || !isValidCanisterId(cid)) return null;
                     return (
                       <a
@@ -2328,7 +2345,7 @@
                         : 'Load a project to view canisters'}
                     </p>
                   </div>
-                  {projectLoaded && canisters.length > 0 && (
+                  {projectLoaded && ownedCanisters.length > 0 && (
                     <button
                       onClick={fetchAllCanisterStatuses}
                       disabled={loadingStatuses}
