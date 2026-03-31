@@ -206,18 +206,34 @@
     }
 
     // ---- Confirmation Modal ----
-    function ConfirmModal({ isOpen, title, message, danger, onConfirm, onCancel }) {
+    function ConfirmModal({ isOpen, title, message, danger, onConfirm, onCancel, confirmPhrase }) {
+      const [typed, setTyped] = React.useState('');
       if (!isOpen) return null;
+      const phraseMatch = !confirmPhrase || typed === confirmPhrase;
       return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="p-5">
               <h3 className={`text-base font-semibold ${danger ? 'text-red-400' : 'text-white'} mb-2`}>{title}</h3>
               <p className="text-sm text-gray-400">{message}</p>
+              {confirmPhrase && (
+                <div className="mt-4">
+                  <p className="text-xs text-gray-500 mb-2">Type <span className="font-mono text-gray-300">"{confirmPhrase}"</span> to confirm:</p>
+                  <input
+                    type="text"
+                    value={typed}
+                    onChange={(e) => setTyped(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && phraseMatch && onConfirm()}
+                    className="w-full bg-surface-800 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-red-500"
+                    placeholder={confirmPhrase}
+                    autoFocus
+                  />
+                </div>
+              )}
             </div>
             <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
               <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
-              <button onClick={onConfirm} className={`px-4 py-2 text-sm font-medium rounded-lg ${danger ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-icp-500 hover:bg-icp-600 text-white'}`}>Confirm</button>
+              <button onClick={onConfirm} disabled={!phraseMatch} className={`px-4 py-2 text-sm font-medium rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${danger ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-icp-500 hover:bg-icp-600 text-white'}`}>Confirm</button>
             </div>
           </div>
         </div>
@@ -1128,7 +1144,11 @@
 
       // Count deployment states
       const deployed = canisterNames.filter(n => canisters[n].canisterId);
-      const needsRedeploy = canisterNames.filter(n => canisters[n].hashMatch === false);
+      const needsRedeploy = canisterNames.filter(n => {
+        const conf = (canisterConfigs || []).find(cc => cc.name === n);
+        if (conf && conf.type === 'assets') return false;
+        return canisters[n].hashMatch === false;
+      });
       const upToDate = canisterNames.filter(n => canisters[n].hashMatch === true);
       const notDeployed = canisterNames.filter(n => !canisters[n].canisterId);
 
@@ -1149,14 +1169,18 @@
                 const isDeployed = !!c.canisterId;
                 const hasLocalWasm = c.localWasmExists;
                 const conf = (canisterConfigs || []).find(cc => cc.name === name);
-                const isRemote = conf && (conf.remote || conf.type === 'pull' || conf.type === 'unknown');
+                const isRemote = conf && (conf.remote || conf.type === 'pull' || (conf.type === 'unknown' && !conf.isPrebuilt));
+                const isAssetCanister = conf && conf.type === 'assets';
 
                 // Determine deploy state
+                // Asset canisters use a fetched WASM (recipe), so local hash comparison is unreliable
                 let badge, badgeClass;
                 if (isRemote) {
                   badge = 'External'; badgeClass = 'bg-gray-500/20 text-gray-500';
                 } else if (!isDeployed) {
                   badge = 'Not Deployed'; badgeClass = 'bg-gray-500/20 text-gray-400';
+                } else if (isAssetCanister && c.hashMatch === false) {
+                  badge = 'Deployed'; badgeClass = 'bg-blue-500/20 text-blue-400';
                 } else if (c.hashMatch === true) {
                   badge = 'Up to Date'; badgeClass = 'bg-green-500/20 text-green-400';
                 } else if (c.hashMatch === false) {
@@ -1169,13 +1193,18 @@
                   <div key={name} className={`bg-surface-900 border rounded-lg p-3 ${c.hashMatch === false ? 'border-orange-500/30' : 'border-surface-700'}`}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-white font-medium">{name}</span>
-                      <span className={`text-[11px] px-2 py-0.5 rounded-full ${badgeClass}`}>{badge}</span>
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full ${badgeClass} ${isAssetCanister && isDeployed ? 'relative group' : ''}`}>
+                        {badge}
+                        {isAssetCanister && isDeployed && (
+                          <span className="absolute bottom-full right-0 mb-1.5 hidden group-hover:block text-[10px] text-gray-300 bg-surface-800 border border-surface-600 rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">Not built locally — no hash comparison</span>
+                        )}
+                      </span>
                     </div>
                     {isDeployed && (
                       <div className="text-xs text-gray-500 space-y-0.5">
                         <div>ID: <span className="text-gray-400 font-mono">{c.canisterId}</span></div>
                         {c.status && <div>Status: <span className={c.status === 'Running' ? 'text-green-400' : 'text-yellow-400'}>{c.status}</span></div>}
-                        {c.hashMatch === false && (
+                        {c.hashMatch === false && !isAssetCanister && (
                           <div className="mt-1 text-orange-400">
                             <div>Local build differs from deployed version</div>
                             <div className="text-[10px] text-gray-600 font-mono mt-0.5">
@@ -1333,7 +1362,7 @@
       const isRemoteForNetwork = useCallback((canister, net) => {
         if (canister.pullType) return true;
         if (canister.isPrebuilt && net !== 'local') return true;
-        if (canister.type === 'unknown') return true;
+        if (canister.type === 'unknown' && !canister.isPrebuilt) return true;
         if (!canister.remote || !canister.remote.id) return false;
         // Check the exact network key first, then fall back to 'ic' for any non-local network
         if (canister.remote.id[net]) return true;
@@ -1371,7 +1400,7 @@
             setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'icp.yaml'})` }]);
             setLogs((prev) => [
               ...prev,
-              { type: 'info', text: `Found ${data.canisters.filter(c => !c.isPrebuilt).length} canister(s): ${data.canisters.filter(c => !c.isPrebuilt).map((c) => c.name).join(', ')}` },
+              { type: 'info', text: `Found ${data.canisters.length} canister(s): ${data.canisters.map((c) => c.name).join(', ')}` },
             ]);
             if (nets.length > 2) {
               setLogs((prev) => [...prev, { type: 'info', text: `Networks: ${nets.map((n) => n === 'ic' ? 'Production (ic)' : n).join(', ')}` }]);
@@ -1608,6 +1637,7 @@
           title: `DELETE canister "${name}"?`,
           message: 'This will permanently delete the canister and all its data. This cannot be undone.',
           danger: true,
+          confirmPhrase: 'delete this canister',
           onConfirm: () => { setConfirmModal(null); canisterAction('delete', name); },
         });
       }, [canisterAction]);

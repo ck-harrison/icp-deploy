@@ -452,7 +452,7 @@ app.post('/api/project/info', (req, res) => {
               else currentCanister.type = t;
             }
             // Detect pre-built canisters defined via build.steps (not recipe)
-            if (/^\s+-?\s*type:\s*pre-built/.test(line)) { currentCanister.isPrebuilt = true; }
+            if (/^\s+-?\s*type:\s*pre-built/.test(line)) { currentCanister.isPrebuilt = true; currentCanister.type = 'pre-built'; }
             const mainMatch = line.match(/^\s+main:\s*(.+)/);
             if (mainMatch) currentCanister.main = mainMatch[1].trim().replace(/^["']|["']$/g, '');
             const dirMatch = line.match(/^\s+dir:\s*(.+)/);
@@ -1059,16 +1059,15 @@ app.post('/api/deploy/summary', async (req, res) => {
     }
 
     // Check if local WASM exists and compute hash for comparison
-    // dfx builds to .dfx/<network>/canisters/<name>/<name>.wasm
-    // icp builds to .icp/cache/<name>/<name>.wasm or target/wasm32-.../release/<name>.wasm
+    // icp CLI builds to .icp/cache/artifacts/<name> (no extension, may be gzip)
+    // dfx builds to .dfx/<network>/canisters/<name>/<name>.wasm[.gz]
     const localNet = network === 'ic' ? 'ic' : 'local';
     const wasmCandidates = [
+      join(projectPath, '.icp', 'cache', 'artifacts', name),
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm.gz`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm.gz`),
-      join(projectPath, '.icp', 'cache', name, `${name}.wasm`),
-      join(projectPath, '.icp', 'cache', name, `${name}.wasm.gz`),
     ];
     let localWasmPath = null;
     for (const wp of wasmCandidates) {
@@ -1078,7 +1077,9 @@ app.post('/api/deploy/summary', async (req, res) => {
       entry.localWasmExists = true;
       try {
         let wasmBytes = readFileSync(localWasmPath);
-        if (localWasmPath.endsWith('.gz')) {
+        // Detect gzip by magic bytes (1f 8b) rather than file extension
+        const isGzip = wasmBytes[0] === 0x1f && wasmBytes[1] === 0x8b;
+        if (isGzip) {
           wasmBytes = gunzipSync(wasmBytes);
         }
         const hash = createHash('sha256').update(wasmBytes).digest('hex');
