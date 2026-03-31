@@ -8,6 +8,7 @@ ICP Deploy gives you a browser UI that wraps the `icp` CLI for common canister o
 
 - **Deploy** — select canisters, choose upgrade/reinstall/install mode, watch logs stream live
 - **Monitor** — see cycles balance, memory usage, running status, and module hash for every canister
+- **Controllers** — view, add, and remove canister controllers
 - **Snapshots** — create, restore, download, and delete canister snapshots (auto stop/restart handled for you)
 - **Identities** — switch active identity; principal and ICP balance update in the header
 - **Cycles** — top up canister cycles from ICP; see if cycles are stranded on the cycles ledger
@@ -43,7 +44,7 @@ Then open [http://localhost:3456](http://localhost:3456).
 
 ### Deploying to mainnet
 
-The dashboard requires confirmation before any mainnet deploy. Reinstall mode requires typing `i will wipe all my app data` to confirm — this is intentional.
+The dashboard requires confirmation before any mainnet deploy. Reinstall mode requires typing a confirmation phrase — this is intentional. Deleting a canister also requires typing `delete this canister` to confirm.
 
 ### Snapshots
 
@@ -65,8 +66,8 @@ This tool runs on localhost and is intended for single-user developer machines. 
 ## Architecture
 
 ```
-server.js          Express + WebSocket backend (~1500 lines)
-public/index.html  Single-file React frontend (~2600 lines, CDN React 18)
+server.js          Express + WebSocket backend (~1700 lines)
+public/index.html  Single-file React frontend (~2800 lines, CDN React 18)
 ```
 
 Settings are persisted to `~/.canister-panel-settings.json`. Deploy history is written to `.deploy-history.json` in each project root.
