@@ -2,8 +2,6 @@
 
 A local developer dashboard for managing [Internet Computer](https://internetcomputer.org) canister deployments. Built as a lightweight alternative to the `dfx` command line for day-to-day canister operations.
 
-![ICP Deploy screenshot showing canister cards with cycles health indicators](https://raw.githubusercontent.com/ck-harrison/icp-deploy/main/docs/screenshot.png)
-
 ## What It Does
 
 ICP Deploy gives you a browser UI that wraps the `icp` (or `dfx`) CLI for common canister operations:
