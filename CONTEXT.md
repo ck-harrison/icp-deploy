@@ -1,7 +1,7 @@
-# Canister Control Panel - Project Context
+# ICP Deploy - Project Context
 
 ## What This Is
-A local developer tool (React UI + Express backend) for managing ICP (Internet Computer Protocol) canister deployments. A UI wrapper around `dfx` (and future `icp`) CLI commands. Originally called "ICP Deploy Dashboard" — renamed to "Canister Control Panel" to reflect broader scope beyond just deploying.
+A local developer tool (React UI + Express backend) for managing ICP (Internet Computer Protocol) canister deployments. A UI wrapper around `icp` CLI (with `dfx` fallback).
 
 ## Architecture
 - **Runs locally** on your machine (localhost:3456)
@@ -210,7 +210,7 @@ A local developer tool (React UI + Express backend) for managing ICP (Internet C
 - Hardcoded "dfx" references in UI messages — changed to generic "project config"
 
 ## Project Location
-- Dashboard code: `/Users/christopher.harrison/Code/Canister Control Panel/`
+- Dashboard code: `/Users/christopher.harrison/Code/ICP Deploy/`
 - Test project (Harrison Data): `/Users/christopher.harrison/Code/Harrison Data/`
 
 ## Origin

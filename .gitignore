@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 *.log
 .claude/
+.topup-history.json
+canister_control_panel_dx_report.md

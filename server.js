@@ -1457,7 +1457,7 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 3456;
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  ICP Deploy Dashboard`);
+  console.log(`\n  ICP Deploy`);
   console.log(`  --------------------`);
   console.log(`  Open http://localhost:${PORT}\n`);
 });
