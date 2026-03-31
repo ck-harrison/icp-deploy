@@ -13,9 +13,26 @@ import { randomUUID } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 }); // 64KB max message size
 
 app.use(express.json({ limit: '50kb' }));
+
+// Simple rate limiter — per-IP, sliding window
+const rateLimitMap = new Map();
+function rateLimit(windowMs, maxRequests) {
+  return (req, res, next) => {
+    const key = req.ip;
+    const now = Date.now();
+    if (!rateLimitMap.has(key)) rateLimitMap.set(key, []);
+    const timestamps = rateLimitMap.get(key).filter(t => now - t < windowMs);
+    if (timestamps.length >= maxRequests) {
+      return res.status(429).json({ error: 'Too many requests — try again later' });
+    }
+    timestamps.push(now);
+    rateLimitMap.set(key, timestamps);
+    next();
+  };
+}
 
 // Security middleware — CORS + CSRF protection (must be before static files and routes)
 app.use((req, res, next) => {
@@ -28,6 +45,12 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', `http://localhost:${PORT}`);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  // Security headers — prevent clickjacking, MIME sniffing, and XSS
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; img-src 'self' data:;");
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -325,8 +348,8 @@ app.post('/api/identity/rename', (req, res) => {
   res.json({ ok: true, oldName, newName });
 });
 
-// Export identity PEM
-app.post('/api/identity/export', (req, res) => {
+// Export identity PEM — rate limited (sensitive: exposes private key)
+app.post('/api/identity/export', rateLimit(60000, 3), (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
@@ -425,9 +448,11 @@ app.post('/api/project/info', (req, res) => {
               if (t.includes('rust')) currentCanister.type = 'rust';
               else if (t.includes('motoko')) currentCanister.type = 'motoko';
               else if (t.includes('asset')) currentCanister.type = 'assets';
-              else if (t.includes('prebuilt')) currentCanister.type = 'custom';
+              else if (t.includes('pre-built') || t.includes('prebuilt')) { currentCanister.type = 'custom'; currentCanister.isPrebuilt = true; }
               else currentCanister.type = t;
             }
+            // Detect pre-built canisters defined via build.steps (not recipe)
+            if (/^\s+-?\s*type:\s*pre-built/.test(line)) { currentCanister.isPrebuilt = true; }
             const mainMatch = line.match(/^\s+main:\s*(.+)/);
             if (mainMatch) currentCanister.main = mainMatch[1].trim().replace(/^["']|["']$/g, '');
             const dirMatch = line.match(/^\s+dir:\s*(.+)/);
@@ -599,7 +624,7 @@ function parseCanisterStatus(raw) {
 
   const controllersMatch = raw.match(/Controllers?:\s*(.+)/i);
   parsed.controllers = controllersMatch
-    ? controllersMatch[1].split(/\s+/).filter(Boolean)
+    ? controllersMatch[1].split(/\s+/).filter(Boolean).map(c => c.replace(/,+$/, ''))
     : [];
 
   // icp CLI extras: idle burn rate, reserved cycles
@@ -712,8 +737,8 @@ app.post('/api/canister/start', (req, res) => {
   res.json({ ok: result.ok, output: result.data });
 });
 
-// Delete a canister (requires confirmation from frontend)
-app.post('/api/canister/delete', (req, res) => {
+// Delete a canister — rate limited (destructive operation)
+app.post('/api/canister/delete', rateLimit(60000, 3), (req, res) => {
   const { path: projectPath, canister, network } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   // Must stop before deleting
@@ -724,10 +749,12 @@ app.post('/api/canister/delete', (req, res) => {
 
 // Update canister settings (e.g., freezing threshold)
 app.post('/api/canister/update-settings', (req, res) => {
-  const { path: projectPath, canister, network, freezingThreshold, addController } = req.body;
+  const { path: projectPath, canister, network, freezingThreshold, addController, removeController } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
 
-  const args = ['canister', 'update-settings', canister, ...networkArgs(network)];
+  const args = CLI === 'icp'
+    ? ['canister', 'settings', 'update', canister, ...networkArgs(network)]
+    : ['canister', 'update-settings', canister, ...networkArgs(network)];
 
   if (freezingThreshold != null) {
     const ft = String(parseInt(freezingThreshold, 10));
@@ -741,13 +768,19 @@ app.post('/api/canister/update-settings', (req, res) => {
     }
     args.push('--add-controller', addController);
   }
+  if (removeController) {
+    if (!/^[a-z0-9\-]+$/.test(removeController)) {
+      return res.status(400).json({ error: 'Invalid controller principal' });
+    }
+    args.push('--remove-controller', removeController);
+  }
 
   const result = runCliSync(args, projectPath);
   res.json({ ok: result.ok, output: result.data });
 });
 
-// Top up a canister with cycles (source: 'cycles' = from cycles balance, 'icp' = mint first then top up)
-app.post('/api/canister/top-up', (req, res) => {
+// Top up a canister with cycles — rate limited (financial operation)
+app.post('/api/canister/top-up', rateLimit(60000, 5), (req, res) => {
   const { path: projectPath, canister, network, amount, source } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
@@ -826,8 +859,64 @@ app.post('/api/canister/snapshot/create', (req, res) => {
   if (!result.ok) return res.json({ ok: false, error: result.data });
 
   // Try to extract snapshot ID from output
-  const idMatch = result.data.match(/Snapshot ID:\s*([0-9a-f]+)/i);
+  const idMatch = result.data.match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i);
   res.json({ ok: true, snapshotId: idMatch ? idMatch[1] : null, output: result.data });
+});
+
+// Safe snapshot: stop → create snapshot → restart (if was running)
+app.post('/api/canister/snapshot/safe-create', (req, res) => {
+  const { path: projectPath, canister, network, replace } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const netArgs = networkArgs(network);
+
+  const steps = { stopped: false, snapshotCreated: false, restarted: false };
+  let wasRunning = false;
+
+  // 1. Check current status
+  const statusResult = runCliSync(['canister', 'status', canister, ...netArgs], projectPath);
+  if (statusResult.ok) {
+    wasRunning = /Status:\s*Running/i.test(statusResult.data);
+  }
+
+  // 2. Stop if running
+  if (wasRunning) {
+    const stopResult = runCliSync(['canister', 'stop', canister, ...netArgs], projectPath);
+    if (!stopResult.ok) {
+      return res.json({ ok: false, error: `Failed to stop canister: ${stopResult.data}`, steps });
+    }
+    steps.stopped = true;
+  }
+
+  // 3. Create snapshot
+  const snapArgs = ['canister', 'snapshot', 'create', canister, ...netArgs];
+  if (replace) {
+    if (!/^[0-9a-f]+$/i.test(replace)) {
+      // Restart before returning error
+      if (wasRunning) runCliSync(['canister', 'start', canister, ...netArgs], projectPath);
+      return res.status(400).json({ error: 'Invalid snapshot ID' });
+    }
+    snapArgs.push('--replace', replace);
+  }
+  const snapResult = runCliSync(snapArgs, projectPath);
+  const idMatch = snapResult.ok ? snapResult.data.match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i) : null;
+  steps.snapshotCreated = snapResult.ok;
+
+  // 4. Restart if was running (always attempt, even if snapshot failed)
+  if (wasRunning) {
+    const startResult = runCliSync(['canister', 'start', canister, ...netArgs], projectPath);
+    steps.restarted = startResult.ok;
+  }
+
+  if (!snapResult.ok) {
+    return res.json({ ok: false, error: `Snapshot failed: ${snapResult.data}`, steps });
+  }
+
+  res.json({
+    ok: true,
+    snapshotId: idMatch ? idMatch[1] : null,
+    output: snapResult.data,
+    steps,
+  });
 });
 
 // Load (restore) a snapshot
@@ -894,7 +983,7 @@ app.post('/api/canister/snapshot/upload', (req, res) => {
   });
 
   if (result.status === 0) {
-    const idMatch = (result.stdout || '').match(/Snapshot ID:\s*([0-9a-f]+)/i);
+    const idMatch = (result.stdout || '').match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i);
     res.json({ ok: true, snapshotId: idMatch ? idMatch[1] : null, output: (result.stdout || '').trim() });
   } else {
     res.json({ ok: false, error: (result.stderr || result.stdout || '').trim() });
@@ -1085,8 +1174,8 @@ app.get('/api/cycles/identity-balance', (req, res) => {
   res.json({ cycles, raw: result.data });
 });
 
-// Mint cycles from ICP
-app.post('/api/cycles/mint', (req, res) => {
+// Mint cycles from ICP — rate limited (financial operation)
+app.post('/api/cycles/mint', rateLimit(60000, 5), (req, res) => {
   const { amount, unit } = req.body; // unit: 'icp' or 'cycles'
   if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
     return res.status(400).json({ error: 'amount must be a positive number' });
@@ -1122,6 +1211,57 @@ app.post('/api/cycles/balance', (req, res) => {
 
   const parsed = parseCanisterStatus(result.data);
   res.json({ canister, cycles: parsed.cycles || 'unknown', raw: result.data });
+});
+
+// Check cycles ledger balance held under a canister's principal
+// Queries the cycles ledger (um5iw-rqaaa-aaaaq-qaaba-cai) ICRC-1 balance_of
+const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
+app.post('/api/cycles/ledger-balance', (req, res) => {
+  const { canisterId, network } = req.body;
+  if (!canisterId || !/^[a-z0-9\-]+$/.test(canisterId)) {
+    return res.status(400).json({ error: 'Invalid canister ID' });
+  }
+  // Only meaningful on mainnet — local replica won't have the cycles ledger
+  const netArgs = network && network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : [];
+  if (!network || network === 'local') {
+    return res.json({ canisterId, balance: '0' });
+  }
+  const candid = `(record { owner = principal "${canisterId}"; subaccount = null })`;
+  const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs]);
+  if (!result.ok) return res.json({ canisterId, balance: '0', error: result.data });
+  // Output: "(2_850_000_000_000 : nat)"
+  const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
+  const balance = match ? match[1].replace(/_/g, '') : '0';
+  res.json({ canisterId, balance });
+});
+
+// Batch check cycles ledger balances for multiple canisters
+app.post('/api/cycles/ledger-balances', (req, res) => {
+  const { canisterIds, network } = req.body;
+  if (!canisterIds || !Array.isArray(canisterIds)) {
+    return res.status(400).json({ error: 'canisterIds array required' });
+  }
+  if (!network || network === 'local') {
+    return res.json(Object.fromEntries(canisterIds.map(id => [id, '0'])));
+  }
+  const netArgs = network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : [];
+  const results = {};
+  for (const cid of canisterIds) {
+    if (!/^[a-z0-9\-]+$/.test(cid)) { results[cid] = '0'; continue; }
+    const candid = `(record { owner = principal "${cid}"; subaccount = null })`;
+    const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs]);
+    if (result.ok) {
+      const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
+      results[cid] = match ? match[1].replace(/_/g, '') : '0';
+    } else {
+      results[cid] = '0';
+    }
+  }
+  res.json(results);
 });
 
 // Check if local replica is running
@@ -1202,11 +1342,19 @@ app.post('/api/browse', (req, res) => {
 
 // ---------- WebSocket: live deploy ----------
 
+// Limit concurrent WebSocket connections
+const MAX_WS_CONNECTIONS = 5;
 wss.on('connection', (ws, req) => {
-  // Verify WebSocket origin
+  // Verify WebSocket origin — must match this server's port exactly
   const origin = req.headers.origin || '';
-  if (origin && !origin.match(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/)) {
+  const allowedWsOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+  if (origin && !allowedWsOrigins.includes(origin)) {
     ws.close(1008, 'Forbidden: invalid origin');
+    return;
+  }
+
+  if (wss.clients.size > MAX_WS_CONNECTIONS) {
+    ws.close(1013, 'Too many connections');
     return;
   }
 
@@ -1248,6 +1396,16 @@ wss.on('connection', (ws, req) => {
 
       // Optional: build before deploy
       if (msg.build) {
+        // Validate canister names before build
+        if (canisters && canisters.length > 0) {
+          for (const c of canisters) {
+            try { assertSafeName(c, 'canister'); } catch (e) {
+              ws.send(JSON.stringify({ type: 'error', data: e.message }));
+              return;
+            }
+          }
+        }
+
         ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} build ${(canisters || []).join(' ')}` }));
         ws.send(JSON.stringify({ type: 'status', data: 'building' }));
 
@@ -1370,9 +1528,18 @@ wss.on('connection', (ws, req) => {
 
     if (msg.action === 'start-replica') {
       const { path: projectPath, clean } = msg;
+
+      // Validate path before using as cwd
+      if (projectPath) {
+        try { assertSafePath(projectPath); } catch (e) {
+          ws.send(JSON.stringify({ type: 'error', data: e.message }));
+          return;
+        }
+      }
+
       const args = CLI === 'icp'
-        ? ['network', 'start', '-d', ...(clean ? ['--clean'] : [])]
-        : ['start', '--background', ...(clean ? ['--clean'] : [])];
+        ? ['network', 'start', '-d', ...(clean === true ? ['--clean'] : [])]
+        : ['start', '--background', ...(clean === true ? ['--clean'] : [])];
 
       ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} ${args.join(' ')}` }));
       ws.send(JSON.stringify({ type: 'status', data: 'starting-replica' }));

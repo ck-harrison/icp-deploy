@@ -6,9 +6,9 @@
   <title>ICP Deploy</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -38,6 +38,10 @@
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback } = React;
+
+    // ---- Validation helpers ----
+    // Canister IDs are base32-encoded with dashes: xxxxx-xxxxx-xxxxx-xxxxx-cai
+    const isValidCanisterId = (id) => /^[a-z0-9\-]+$/.test(id);
 
     // ---- API helpers ----
     const api = {
@@ -214,6 +218,116 @@
             <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
               <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
               <button onClick={onConfirm} className={`px-4 py-2 text-sm font-medium rounded-lg ${danger ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-icp-500 hover:bg-icp-600 text-white'}`}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Controllers Modal ----
+    function ControllersModal({ isOpen, canisterName, controllers, principal, projectPath, network, onDone, onClose }) {
+      const [newPrincipal, setNewPrincipal] = useState('');
+      const [busy, setBusy] = useState(null); // 'add' | principal-being-removed
+      const [error, setError] = useState(null);
+      const [confirmRemove, setConfirmRemove] = useState(null); // principal to remove
+
+      if (!isOpen) return null;
+
+      const handleAdd = async () => {
+        const p = newPrincipal.trim();
+        if (!p || !/^[a-z0-9\-]+$/.test(p)) { setError('Invalid principal format'); return; }
+        if (controllers.includes(p)) { setError('Already a controller'); return; }
+        setError(null);
+        setBusy('add');
+        try {
+          const data = await api.post('/api/canister/update-settings', { path: projectPath, canister: canisterName, network, addController: p });
+          if (!data.ok) { setError(data.output || 'Failed to add controller'); }
+          else { setNewPrincipal(''); onDone(); }
+        } catch (e) { setError(e.message); }
+        setBusy(null);
+      };
+
+      const handleRemove = async (ctrl) => {
+        setConfirmRemove(null);
+        setError(null);
+        setBusy(ctrl);
+        try {
+          const data = await api.post('/api/canister/update-settings', { path: projectPath, canister: canisterName, network, removeController: ctrl });
+          if (!data.ok) { setError(data.output || 'Failed to remove controller'); }
+          else { onDone(); }
+        } catch (e) { setError(e.message); }
+        setBusy(null);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-lg shadow-2xl">
+            <div className="p-5 border-b border-surface-700 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-white">Controllers</h3>
+                <p className="text-xs text-gray-500 mt-0.5 font-mono">{canisterName}</p>
+              </div>
+              <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="p-5 space-y-2">
+              {controllers.length === 0 && <p className="text-sm text-gray-500">No controller data available.</p>}
+              {controllers.map((ctrl) => {
+                const isMe = ctrl === principal;
+                const isLast = controllers.length === 1;
+                const isRemoving = busy === ctrl;
+                return (
+                  <div key={ctrl} className="flex items-center justify-between gap-3 px-3 py-2.5 bg-surface-800 rounded-lg border border-surface-700">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[11px] font-mono text-gray-300 break-all">{ctrl}</span>
+                      {isMe && <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded font-medium">you</span>}
+                    </div>
+                    {confirmRemove === ctrl ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[10px] text-red-400">Remove?</span>
+                        <button onClick={() => handleRemove(ctrl)} className="text-[10px] px-2 py-1 bg-red-500 text-white rounded font-medium hover:bg-red-600">Yes</button>
+                        <button onClick={() => setConfirmRemove(null)} className="text-[10px] px-2 py-1 bg-surface-700 text-gray-300 rounded font-medium hover:bg-surface-600">No</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => { if (!isLast) setConfirmRemove(ctrl); }}
+                        disabled={isLast || isRemoving}
+                        title={isLast ? 'Cannot remove the only controller' : `Remove ${ctrl}`}
+                        className="shrink-0 p-1 text-gray-600 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors rounded"
+                      >
+                        {isRemoving
+                          ? <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                          : <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="px-5 pb-2">
+              <p className="text-[11px] font-medium text-gray-400 mb-2">Add controller</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newPrincipal}
+                  onChange={(e) => { setNewPrincipal(e.target.value); setError(null); }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+                  placeholder="Principal ID (e.g. aaaaa-aa)"
+                  className="flex-1 bg-surface-800 border border-surface-600 rounded-lg px-3 py-2 text-xs text-white font-mono placeholder-gray-600 focus:outline-none focus:border-icp-500"
+                />
+                <button
+                  onClick={handleAdd}
+                  disabled={busy === 'add' || !newPrincipal.trim()}
+                  className="px-4 py-2 text-xs font-medium bg-icp-500 text-white rounded-lg hover:bg-icp-600 disabled:opacity-50 transition-colors"
+                >
+                  {busy === 'add' ? 'Adding…' : 'Add'}
+                </button>
+              </div>
+              {error && <p className="text-[11px] text-red-400 mt-2">{error}</p>}
+            </div>
+            <div className="p-4 border-t border-surface-700 flex justify-end">
+              <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Close</button>
             </div>
           </div>
         </div>
@@ -568,14 +682,24 @@
         setActionLoading('create');
         setMessage(null);
         try {
-          const data = await api.post('/api/canister/snapshot/create', {
+          // Use safe-create: automatically stops → snapshots → restarts
+          if (isRunning) setMessage({ type: 'info', text: 'Stopping canister...' });
+          const data = await api.post('/api/canister/snapshot/safe-create', {
             path: projectPath, canister: selectedCanister, network,
           });
           if (data.ok) {
-            setMessage({ type: 'success', text: `Snapshot created${data.snapshotId ? ': ' + data.snapshotId : ''}` });
+            const parts = [`Snapshot created${data.snapshotId ? ': ' + data.snapshotId : ''}`];
+            if (data.steps?.stopped) parts.push('(auto-stopped');
+            if (data.steps?.restarted) parts[parts.length - 1] += ' and restarted)';
+            else if (data.steps?.stopped) parts[parts.length - 1] += ')';
+            setMessage({ type: 'success', text: parts.join(' ') });
             fetchSnapshots();
           } else {
-            setMessage({ type: 'error', text: data.error || 'Failed to create snapshot' });
+            let errText = data.error || 'Failed to create snapshot';
+            if (data.steps?.stopped && !data.steps?.restarted) {
+              errText += ' — WARNING: canister may still be stopped, check Canisters tab';
+            }
+            setMessage({ type: 'error', text: errText });
           }
         } catch (e) {
           setMessage({ type: 'error', text: e.message });
@@ -732,15 +856,15 @@
             </div>
           </div>
 
-          {/* Stop/Start notice */}
+          {/* Auto stop/restart notice */}
           {isRunning && (
-            <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl">
-              <svg className="w-4 h-4 text-yellow-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            <div className="flex items-start gap-2 p-3 bg-icp-500/10 border border-icp-500/20 rounded-xl">
+              <svg className="w-4 h-4 text-icp-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
               </svg>
               <div>
-                <p className="text-xs text-yellow-300 font-medium">Canister must be stopped to create or restore snapshots</p>
-                <p className="text-[11px] text-yellow-400/70 mt-0.5">Stop the canister from the Canisters tab, or it will be shown as an error during snapshot operations.</p>
+                <p className="text-xs text-icp-300 font-medium">Canister is running — snapshots will auto-stop and restart it</p>
+                <p className="text-[11px] text-icp-400/70 mt-0.5">Creating a snapshot will briefly stop the canister, take the snapshot, then restart it automatically.</p>
               </div>
             </div>
           )}
@@ -768,10 +892,10 @@
                 <p className="text-[11px] text-gray-500 mb-3">Saves canister WASM, heap, stable memory, and all data. Max 10 per canister.</p>
                 <button
                   onClick={createSnapshot}
-                  disabled={!!actionLoading || isRunning}
+                  disabled={!!actionLoading}
                   className="w-full py-2.5 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-xl text-sm font-medium hover:bg-icp-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
                 >
-                  {actionLoading === 'create' ? <><SpinnerIcon className="w-4 h-4" /> Creating...</> : (
+                  {actionLoading === 'create' ? <><SpinnerIcon className="w-4 h-4" /> {isRunning ? 'Stopping & snapshotting...' : 'Creating...'}</> : (
                     <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM18.75 10.5h.008v.008h-.008V10.5Z" /></svg> Create Snapshot</>
                   )}
                 </button>
@@ -871,7 +995,7 @@
                   </div>
                 ) : (
                   <div className="divide-y divide-surface-800">
-                    {snapshots.map((snap) => (
+                    {[...snapshots].sort((a, b) => new Date(b.takenAt) - new Date(a.takenAt)).map((snap) => (
                       <div key={snap.id} className="px-5 py-4">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
@@ -1105,6 +1229,7 @@
       const [cyclesBalance, setCyclesBalance] = useState(null);
       const [mintModalOpen, setMintModalOpen] = useState(false);
       const [topUpModal, setTopUpModal] = useState(null); // { canisterName }
+      const [controllersModal, setControllersModal] = useState(null); // { canisterName, controllers }
       const [cliInfo, setCliInfo] = useState({ cli: 'icp', version: '' });
       const [canisters, setCanisters] = useState([]);
       const [selectedCanisters, setSelectedCanisters] = useState([]);
@@ -1115,6 +1240,7 @@
       const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
       const [replicaRunning, setReplicaRunning] = useState(false);
       const [canisterStatuses, setCanisterStatuses] = useState({});
+      const [cyclesLedgerBalances, setCyclesLedgerBalances] = useState({}); // canisterId -> balance string
       const [topupHistory, setTopupHistory] = useState([]);
       const [tab, setTab] = useState('deploy'); // deploy, canisters
       const [loadingProject, setLoadingProject] = useState(false);
@@ -1206,6 +1332,8 @@
       // remote.id.ic = "..." means it's external on mainnet but local on local
       const isRemoteForNetwork = useCallback((canister, net) => {
         if (canister.pullType) return true;
+        if (canister.isPrebuilt && net !== 'local') return true;
+        if (canister.type === 'unknown') return true;
         if (!canister.remote || !canister.remote.id) return false;
         // Check the exact network key first, then fall back to 'ic' for any non-local network
         if (canister.remote.id[net]) return true;
@@ -1243,7 +1371,7 @@
             setLogs([{ type: 'info', text: `Loaded project from ${path} (${data.configType || 'icp.yaml'})` }]);
             setLogs((prev) => [
               ...prev,
-              { type: 'info', text: `Found ${data.canisters.length} canister(s): ${data.canisters.map((c) => c.name).join(', ')}` },
+              { type: 'info', text: `Found ${data.canisters.filter(c => !c.isPrebuilt).length} canister(s): ${data.canisters.filter(c => !c.isPrebuilt).map((c) => c.name).join(', ')}` },
             ]);
             if (nets.length > 2) {
               setLogs((prev) => [...prev, { type: 'info', text: `Networks: ${nets.map((n) => n === 'ic' ? 'Production (ic)' : n).join(', ')}` }]);
@@ -1417,9 +1545,19 @@
           const data = await api.post('/api/canisters/status-all', {
             path: projectPath,
             network,
-            canisterNames: ownedCanisters.map((c) => c.name),
+            canisterNames: canisters.map((c) => c.name),
           });
           setCanisterStatuses(data);
+          // Fetch cycles ledger balances for canisters that have IDs (non-local only)
+          if (network && network !== 'local') {
+            const ids = Object.values(data).map(s => s.canisterId).filter(Boolean);
+            if (ids.length > 0) {
+              try {
+                const ledgerData = await api.post('/api/cycles/ledger-balances', { canisterIds: ids, network });
+                setCyclesLedgerBalances(ledgerData);
+              } catch { /* non-critical */ }
+            }
+          }
         } catch {
           // individual errors are in the response per-canister
         }
@@ -1430,6 +1568,7 @@
       useEffect(() => {
         if (tab === 'canisters' && projectLoaded && canisters.length > 0) {
           setCanisterStatuses({});
+          setCyclesLedgerBalances({});
           fetchAllCanisterStatuses();
         }
       }, [tab, network]);
@@ -1585,6 +1724,12 @@
                   <span className="text-xs text-gray-400">
                     Replica {replicaRunning ? 'running' : 'stopped'}
                   </span>
+                  {!replicaRunning && (
+                    <button onClick={startReplica} className="text-[10px] px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded hover:bg-green-500/20 transition-colors font-medium">Start</button>
+                  )}
+                  {replicaRunning && (
+                    <button onClick={async () => { await api.post('/api/replica/stop'); setReplicaRunning(false); setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]); }} className="text-[10px] px-1.5 py-0.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors font-medium">Stop</button>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <div className={`w-2 h-2 rounded-full ${statusColor[deployStatus]}`} />
@@ -1681,7 +1826,7 @@
                 const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
                 const fs = fc && canisterStatuses[fc.name];
                 const cid = fs?.canisterId;
-                if (!cid) return null;
+                if (!cid || !isValidCanisterId(cid)) return null;
                 return (
                   <a
                     href={`https://${cid}.icp0.io`}
@@ -1806,7 +1951,7 @@
                       >
                         {identities.map((id) => (
                           <option key={id.name} value={id.name}>
-                            {id.name} {id.active ? '(current)' : ''}
+                            {id.name} {id.name === selectedIdentity ? '(current)' : ''}
                           </option>
                         ))}
                       </select>
@@ -2076,7 +2221,7 @@
                     const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
                     const fs = fc && canisterStatuses[fc.name];
                     const cid = fs?.canisterId;
-                    if (!cid) return null;
+                    if (!cid || !isValidCanisterId(cid)) return null;
                     return (
                       <a
                         href={`https://${cid}.icp0.io`}
@@ -2149,7 +2294,7 @@
                     <h2 className="text-base font-semibold text-white">Canister Status</h2>
                     <p className="text-sm text-gray-500 mt-0.5">
                       {projectLoaded
-                        ? `${canisters.length} canister(s) — ${networkLabel}`
+                        ? `${ownedCanisters.length} canister(s) — ${networkLabel}`
                         : 'Load a project to view canisters'}
                     </p>
                   </div>
@@ -2187,20 +2332,34 @@
                       const remoteId = c.remote?.id?.[network] || c.remote?.id?.ic || c.remote?.id?.local || null;
 
                       if (isRemote) {
+                        const es = canisterStatuses[c.name];
+                        const extCanisterId = es?.canisterId || remoteId;
+                        // Hide externally owned canisters if they have no canister ID on this network
+                        if (!extCanisterId) return null;
+                        const extRunning = es?.runningStatus === 'Running';
+                        const extStopped = es?.runningStatus === 'Stopped';
+                        const extHasStatus = es && !es.error && !es.loading;
                         return (
-                          <div key={c.name} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden opacity-60">
+                          <div key={c.name} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden opacity-75">
                             <div className="px-5 py-4">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-base font-semibold text-white">{c.name}</span>
-                                <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                                  c.type === 'custom' ? 'bg-amber-500/20 text-amber-300' :
-                                  c.type === 'pull' ? 'bg-gray-500/20 text-gray-300' :
-                                  'bg-gray-500/20 text-gray-300'
-                                }`}>{c.type}</span>
-                                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-surface-700 text-gray-400">External</span>
+                              <div className="flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-base font-semibold text-white">{c.name}</span>
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-purple-500/20 text-purple-300 border border-purple-500/20">Externally Owned</span>
+                                </div>
+                                {es?.loading && <SpinnerIcon className="w-4 h-4 text-gray-500" />}
+                                {extHasStatus && (
+                                  <span className={`text-xs font-medium flex items-center gap-1.5 ${extRunning ? 'text-green-400' : extStopped ? 'text-red-400' : 'text-gray-400'}`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${extRunning ? 'bg-green-400' : extStopped ? 'bg-red-400' : 'bg-gray-400'}`} />
+                                    {es.runningStatus}
+                                  </span>
+                                )}
                               </div>
-                              {remoteId && <p className="text-xs text-gray-500 font-mono mt-1">{remoteId}</p>}
-                              <p className="text-xs text-gray-600 mt-2">This canister is an external dependency — not controlled by your identity.</p>
+                              <p className="text-xs text-gray-500 font-mono mt-1">{extCanisterId}</p>
+                              {extHasStatus && es.moduleHash && es.moduleHash !== 'None' && (
+                                <p className="text-[11px] text-gray-600 mt-1.5 font-mono">Module: {es.moduleHash.slice(0, 18)}...</p>
+                              )}
+                              <p className="text-xs text-gray-600 mt-2">Externally owned canister — not controlled by your identity.</p>
                             </div>
                           </div>
                         );
@@ -2270,7 +2429,7 @@
                               {s?.canisterId && (
                                 <div className="flex items-center gap-2 mt-1">
                                   <p className="text-xs text-gray-500 font-mono truncate" title={s.canisterId}>{s.canisterId}</p>
-                                  {network === 'ic' && (
+                                  {network === 'ic' && s.canisterId && isValidCanisterId(s.canisterId) && (
                                     <a
                                       href={`https://${s.canisterId}.icp0.io`}
                                       target="_blank"
@@ -2279,7 +2438,7 @@
                                       title={`Open https://${s.canisterId}.icp0.io`}
                                     >Open</a>
                                   )}
-                                  {network === 'ic' && (
+                                  {network === 'ic' && s.canisterId && isValidCanisterId(s.canisterId) && (
                                     <a
                                       href={`https://dashboard.internetcomputer.org/canister/${s.canisterId}`}
                                       target="_blank"
@@ -2377,8 +2536,20 @@
                           })()}
 
                           {/* Warnings */}
-                          {hasData && (health === 'critical' || (singleController && isMyCanister) || freezeWarning || notMine) && (
+                          {(() => {
+                            const cid = s?.canisterId;
+                            const ledgerBal = cid ? cyclesLedgerBalances[cid] : null;
+                            const hasLedgerBalance = ledgerBal && ledgerBal !== '0' && Number(ledgerBal) > 0;
+                            if (!hasData && !hasLedgerBalance) return null;
+                            if (!hasLedgerBalance && !(health === 'critical' || (singleController && isMyCanister) || freezeWarning || notMine)) return null;
+                            return (
                             <div className="px-5 pb-3 space-y-1.5">
+                              {hasLedgerBalance && (
+                                <div className="flex items-center gap-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                                  <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                                  <span className="text-[11px] text-amber-300">{formatCycles(BigInt(ledgerBal))} cycles held on the cycles ledger under this canister's principal — consider withdrawing or using them</span>
+                                </div>
+                              )}
                               {notMine && (
                                 <div className="flex items-center gap-2 p-2 bg-gray-500/10 border border-gray-500/20 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
@@ -2404,7 +2575,8 @@
                                 </div>
                               )}
                             </div>
-                          )}
+                            );
+                          })()}
 
                           {/* Extra info footer */}
                           {hasData && (
@@ -2454,9 +2626,7 @@
                                 {isMyCanister && hasData && (
                                   <>
                                     <button onClick={() => setTopUpModal({ canisterName: c.name })} className="px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors">Top Up</button>
-                                    {singleController && (
-                                      <button onClick={() => addController(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded-lg hover:bg-purple-500/20 transition-colors">Add Controller</button>
-                                    )}
+                                    <button onClick={() => setControllersModal({ canisterName: c.name, controllers })} className="px-3 py-1.5 text-[11px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded-lg hover:bg-purple-500/20 transition-colors">Controllers</button>
                                   </>
                                 )}
                                 <button onClick={() => fetchCanisterStatus(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:bg-surface-700 transition-colors ml-auto">Refresh</button>
@@ -2526,6 +2696,17 @@
             icpBalance={icpBalance}
             cyclesBalance={cyclesBalance}
             onTopUp={executeTopUp}
+          />
+
+          <ControllersModal
+            isOpen={!!controllersModal}
+            canisterName={controllersModal?.canisterName || ''}
+            controllers={canisterStatuses[controllersModal?.canisterName]?.controllers || controllersModal?.controllers || []}
+            principal={principal}
+            projectPath={projectPath}
+            network={network}
+            onDone={() => { fetchCanisterStatus(controllersModal?.canisterName); }}
+            onClose={() => setControllersModal(null)}
           />
         </div>
       );
