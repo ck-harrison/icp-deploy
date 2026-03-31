@@ -4,7 +4,7 @@ A local developer dashboard for managing [Internet Computer](https://internetcom
 
 ## What It Does
 
-ICP Deploy gives you a browser UI that wraps the `icp` (or `dfx`) CLI for common canister operations:
+ICP Deploy gives you a browser UI that wraps the `icp` CLI for common canister operations:
 
 - **Deploy** — select canisters, choose upgrade/reinstall/install mode, watch logs stream live
 - **Monitor** — see cycles balance, memory usage, running status, and module hash for every canister
@@ -19,8 +19,7 @@ Everything runs locally — no telemetry, no cloud, no accounts.
 
 - **Node.js** 18+
 - **`icp` CLI** 0.2.x — [install instructions](https://internetcomputer.org/docs/building-apps/getting-started/install)
-  (or `dfx` 0.20+ as a fallback)
-- An ICP project with an `icp.yaml` or `dfx.json` config file
+- An ICP project with an `icp.yaml` config file
 
 ## Installation
 
