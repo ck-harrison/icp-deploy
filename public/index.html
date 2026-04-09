@@ -421,6 +421,140 @@
       );
     }
 
+    // ---- Cycles Spending Modal ----
+    function SpendingModal({ isOpen, onClose, topupHistory, network }) {
+      const [period, setPeriod] = React.useState('month');
+      const [view, setView] = React.useState('all'); // 'all' or canister name
+
+      if (!isOpen) return null;
+
+      const formatCyclesShort = (n) => {
+        if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+        if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+        if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+        return n.toLocaleString();
+      };
+
+      // Filter to successful topups on current network
+      const topups = topupHistory
+        .filter((t) => t.success && t.network === network)
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+      // Get unique canister names
+      const canisterNames = [...new Set(topups.map((t) => t.canister))].sort();
+
+      // Filter by selected canister
+      const filtered = view === 'all' ? topups : topups.filter((t) => t.canister === view);
+
+      // Group by time period
+      const getPeriodKey = (ts) => {
+        const d = new Date(ts);
+        if (period === 'week') {
+          const start = new Date(d);
+          start.setDate(start.getDate() - start.getDay());
+          return `Week of ${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+        }
+        if (period === 'month') return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        if (period === 'quarter') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
+        if (period === 'year') return String(d.getFullYear());
+        return d.toLocaleDateString();
+      };
+
+      const grouped = {};
+      for (const t of filtered) {
+        const key = getPeriodKey(t.timestamp);
+        if (!grouped[key]) grouped[key] = { cycles: 0n, count: 0, canisters: {} };
+        const amt = BigInt(t.amount);
+        grouped[key].cycles += amt;
+        grouped[key].count += 1;
+        if (!grouped[key].canisters[t.canister]) grouped[key].canisters[t.canister] = 0n;
+        grouped[key].canisters[t.canister] += amt;
+      }
+
+      const periods = Object.entries(grouped);
+      const totalCycles = filtered.reduce((sum, t) => sum + BigInt(t.amount), 0n);
+
+      return (
+        React.createElement('div', { className: 'fixed inset-0 bg-black/60 flex items-center justify-center z-50', onClick: onClose },
+          React.createElement('div', {
+            className: 'bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col',
+            onClick: (e) => e.stopPropagation()
+          },
+            // Header
+            React.createElement('div', { className: 'p-5 border-b border-surface-700' },
+              React.createElement('h2', { className: 'text-lg font-semibold text-white' }, 'Cycles Spending'),
+              React.createElement('p', { className: 'text-sm text-gray-500 mt-1' },
+                `${filtered.length} top-up(s) totalling ${formatCyclesShort(Number(totalCycles))} cycles`
+              )
+            ),
+            // Controls
+            React.createElement('div', { className: 'px-5 py-3 border-b border-surface-700 flex items-center gap-4 flex-wrap' },
+              // Period selector
+              React.createElement('div', { className: 'flex gap-1 bg-surface-800 rounded-lg p-0.5' },
+                ['week', 'month', 'quarter', 'year'].map((p) =>
+                  React.createElement('button', {
+                    key: p,
+                    onClick: () => setPeriod(p),
+                    className: `px-3 py-1 text-xs rounded-md transition-colors ${period === p ? 'bg-surface-700 text-white' : 'text-gray-500 hover:text-gray-300'}`
+                  }, p.charAt(0).toUpperCase() + p.slice(1))
+                )
+              ),
+              // Canister filter
+              React.createElement('select', {
+                value: view,
+                onChange: (e) => setView(e.target.value),
+                className: 'bg-surface-800 border border-surface-700 rounded-lg px-3 py-1.5 text-xs text-gray-300'
+              },
+                React.createElement('option', { value: 'all' }, 'All canisters'),
+                ...canisterNames.map((n) => React.createElement('option', { key: n, value: n }, n))
+              )
+            ),
+            // Table
+            React.createElement('div', { className: 'flex-1 overflow-y-auto p-5' },
+              periods.length === 0
+                ? React.createElement('p', { className: 'text-sm text-gray-500 text-center py-8' }, 'No top-up history for this network')
+                : React.createElement('div', { className: 'space-y-4' },
+                    ...periods.map(([key, data]) =>
+                      React.createElement('div', { key, className: 'bg-surface-800/50 border border-surface-700 rounded-xl p-4' },
+                        React.createElement('div', { className: 'flex items-center justify-between mb-2' },
+                          React.createElement('span', { className: 'text-sm font-medium text-white' }, key),
+                          React.createElement('div', { className: 'text-right' },
+                            React.createElement('span', { className: 'text-sm font-semibold text-green-400 font-mono' },
+                              formatCyclesShort(Number(data.cycles))
+                            ),
+                            React.createElement('span', { className: 'text-[11px] text-gray-500 ml-2' },
+                              `${data.count} top-up${data.count !== 1 ? 's' : ''}`
+                            )
+                          )
+                        ),
+                        // Per-canister breakdown
+                        view === 'all' && Object.keys(data.canisters).length > 1 &&
+                          React.createElement('div', { className: 'mt-2 pt-2 border-t border-surface-700 space-y-1' },
+                            ...Object.entries(data.canisters)
+                              .sort((a, b) => Number(b[1] - a[1]))
+                              .map(([name, amt]) =>
+                                React.createElement('div', { key: name, className: 'flex items-center justify-between text-[11px]' },
+                                  React.createElement('span', { className: 'text-gray-400' }, name),
+                                  React.createElement('span', { className: 'text-green-400/70 font-mono' }, formatCyclesShort(Number(amt)))
+                                )
+                              )
+                          )
+                      )
+                    )
+                  )
+            ),
+            // Footer
+            React.createElement('div', { className: 'p-4 border-t border-surface-700 flex justify-end' },
+              React.createElement('button', {
+                onClick: onClose,
+                className: 'px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800'
+              }, 'Close')
+            )
+          )
+        )
+      );
+    }
+
     // ---- Top Up Modal (with source choice) ----
     function TopUpModal({ isOpen, canisterName, onClose, icpBalance, cyclesBalance, onTopUp }) {
       const [amount, setAmount] = useState('');
@@ -1257,6 +1391,7 @@
       const [icpBalance, setIcpBalance] = useState(null);
       const [cyclesBalance, setCyclesBalance] = useState(null);
       const [mintModalOpen, setMintModalOpen] = useState(false);
+      const [spendingModalOpen, setSpendingModalOpen] = useState(false);
       const [topUpModal, setTopUpModal] = useState(null); // { canisterName }
       const [controllersModal, setControllersModal] = useState(null); // { canisterName, controllers }
       const [cliInfo, setCliInfo] = useState({ cli: 'icp', version: '' });
@@ -1735,15 +1870,23 @@
                 {(icpBalance !== null || cyclesBalance !== null) && (
                   <div className="flex items-center gap-2 px-2.5 py-1 bg-surface-800 border border-surface-700 rounded-lg">
                     {icpBalance !== null && (
-                      <span className="text-[11px] font-semibold text-icp-400 font-mono" title={`${icpBalance} ICP`}>
+                      <button
+                        onClick={() => setSpendingModalOpen(true)}
+                        className="text-[11px] font-semibold text-icp-400 font-mono hover:text-icp-300 transition-colors"
+                        title="View spending history"
+                      >
                         {parseFloat(icpBalance).toFixed(4)} ICP
-                      </span>
+                      </button>
                     )}
                     {icpBalance !== null && cyclesBalance !== null && (
                       <span className="text-gray-600">|</span>
                     )}
                     {cyclesBalance !== null && (
-                      <span className="text-[11px] font-semibold text-green-400 font-mono" title={`${Number(cyclesBalance).toLocaleString()} cycles`}>
+                      <button
+                        onClick={() => setSpendingModalOpen(true)}
+                        className="text-[11px] font-semibold text-green-400 font-mono hover:text-green-300 transition-colors"
+                        title="View spending history"
+                      >
                         {(() => {
                           const n = Number(cyclesBalance);
                           if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
@@ -1751,7 +1894,7 @@
                           if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
                           return n.toLocaleString();
                         })()} cycles
-                      </span>
+                      </button>
                     )}
                     <button
                       onClick={() => setMintModalOpen(true)}
@@ -2734,6 +2877,13 @@
             icpBalance={icpBalance}
             cyclesBalance={cyclesBalance}
             onMinted={() => { fetchIcpBalance(); fetchCyclesBalance(); }}
+          />
+
+          <SpendingModal
+            isOpen={spendingModalOpen}
+            onClose={() => setSpendingModalOpen(false)}
+            topupHistory={topupHistory}
+            network={network}
           />
 
           <TopUpModal
