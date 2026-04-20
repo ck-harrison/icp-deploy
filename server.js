@@ -438,14 +438,46 @@ app.post('/api/project/info', (req, res) => {
       for (const line of yamlContent.split('\n')) {
         // Detect top-level sections
         if (/^canisters:/.test(line)) { section = 'canisters'; continue; }
-        if (/^environments:/.test(line)) { section = 'environments'; continue; }
+        if (/^environments:/.test(line) || /^networks:/.test(line)) { section = 'environments'; continue; }
         if (/^\S/.test(line) && !line.startsWith('#')) { section = null; continue; }
 
         if (section === 'canisters') {
+          // Inline definition: "- name: foo"
           const nameMatch = line.match(/^\s+-\s+name:\s*(.+)/);
           if (nameMatch) {
             if (currentCanister) canisters.push(currentCanister);
             currentCanister = { name: nameMatch[1].trim().replace(/^["']|["']$/g, ''), type: 'unknown', main: null, source: null, dependencies: [] };
+          }
+          // Directory reference: "- backend/blob-storage" (no "name:" key — points to a subdirectory with canister.yaml)
+          if (!nameMatch) {
+            const dirRefMatch = line.match(/^\s+-\s+([^\s:][^\s]*)\s*$/);
+            if (dirRefMatch) {
+              if (currentCanister) canisters.push(currentCanister);
+              const dirRef = dirRefMatch[1].trim().replace(/^["']|["']$/g, '');
+              currentCanister = { name: dirRef.split('/').pop(), type: 'unknown', main: null, source: dirRef, dependencies: [], dirRef };
+              // Try to read canister.yaml from the referenced directory for more details
+              const canisterYamlPath = join(projectPath, dirRef, 'canister.yaml');
+              if (existsSync(canisterYamlPath)) {
+                try {
+                  const cyaml = readFileSync(canisterYamlPath, 'utf-8');
+                  const cn = cyaml.match(/^name:\s*(.+)/m);
+                  if (cn) currentCanister.name = cn[1].trim().replace(/^["']|["']$/g, '');
+                  // Detect type from recipe or build steps
+                  const recipeType = cyaml.match(/recipe:\s*\n\s+type:\s*["']?(@?[^"'\s]+)/);
+                  if (recipeType) {
+                    const t = recipeType[1];
+                    if (t.includes('rust')) currentCanister.type = 'rust';
+                    else if (t.includes('motoko')) currentCanister.type = 'motoko';
+                    else if (t.includes('asset')) currentCanister.type = 'assets';
+                    else currentCanister.type = t;
+                  }
+                  if (/type:\s*pre-built/.test(cyaml)) { currentCanister.isPrebuilt = true; currentCanister.type = 'pre-built'; }
+                  if (/type:\s*script/.test(cyaml) && !recipeType) currentCanister.type = 'custom';
+                  const mainM = cyaml.match(/^\s+main:\s*(.+)/m);
+                  if (mainM) currentCanister.main = mainM[1].trim().replace(/^["']|["']$/g, '');
+                } catch { /* canister.yaml unreadable, use defaults */ }
+              }
+            }
           }
           if (currentCanister) {
             const typeMatch = line.match(/^\s+type:\s*["']?(@?[^"'\s]+)/);
@@ -1064,18 +1096,22 @@ app.post('/api/deploy/summary', async (req, res) => {
       }
     }
 
-    // Check if local WASM exists and compute hash for comparison
-    // Prioritize .dfx/<network>/ paths — these are the final WASM with metadata/candid embedded,
-    // which is what actually gets deployed to chain. The .icp/cache/artifacts/ path is an
-    // intermediate build artifact BEFORE post-processing, so its hash won't match chain.
+    // Check if local WASM exists and compute hash for comparison.
+    // icp CLI: .icp/cache/artifacts/<name> is the final post-metadata WASM that matches chain.
+    //          .dfx/<net>/ contains the pre-metadata build output (hash won't match).
+    // dfx:     .dfx/<net>/canisters/<name>/<name>.wasm is the final artifact that matches chain.
     const localNet = network === 'ic' ? 'ic' : 'local';
-    const wasmCandidates = [
+    const dfxPaths = [
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm.gz`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm`),
       join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm.gz`),
-      join(projectPath, '.icp', 'cache', 'artifacts', name),
     ];
+    const icpCachePath = join(projectPath, '.icp', 'cache', 'artifacts', name);
+    // icp CLI stores the final deployed artifact in .icp/cache/artifacts/ — check it first
+    const wasmCandidates = CLI === 'icp'
+      ? [icpCachePath, ...dfxPaths]
+      : [...dfxPaths, icpCachePath];
     let localWasmPath = null;
     for (const wp of wasmCandidates) {
       if (existsSync(wp)) { localWasmPath = wp; break; }
@@ -1118,6 +1154,26 @@ app.post('/api/deploy/summary', async (req, res) => {
       c.version = null;
     }
   }
+
+  // Write resolved canister IDs back to canister_ids.json so other machines (and CLI fallback)
+  // can resolve them after a git pull, without needing local CLI state.
+  try {
+    const idsPath = join(projectPath, 'canister_ids.json');
+    const existingIds = readCanisterIds(projectPath);
+    let changed = false;
+    for (const [name, entry] of Object.entries(summary.canisters)) {
+      if (entry.canisterId) {
+        if (!existingIds[name]) existingIds[name] = {};
+        if (existingIds[name][network] !== entry.canisterId) {
+          existingIds[name][network] = entry.canisterId;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      writeFileSync(idsPath, JSON.stringify(existingIds, null, 2) + '\n', 'utf-8');
+    }
+  } catch { /* non-fatal — best effort */ }
 
   res.json(summary);
 });
