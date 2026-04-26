@@ -1328,11 +1328,18 @@ app.post('/api/cycles/ledger-balances', (req, res) => {
   res.json(results);
 });
 
-// Check if local replica is running
-app.get('/api/replica/status', (_req, res) => {
-  const cmd = CLI === 'icp' ? ['network', 'ping'] : ['ping'];
-  const result = runCliSync(cmd);
-  res.json({ running: result.ok, cli: CLI });
+// Check if local replica is running by hitting its status endpoint directly.
+// More reliable than CLI ping (varies by version/args) and CLI-agnostic.
+app.get('/api/replica/status', async (_req, res) => {
+  const ports = [4943, 8000];
+  for (const port of ports) {
+    try {
+      const ctl = AbortSignal.timeout(1500);
+      const r = await fetch(`http://127.0.0.1:${port}/api/v2/status`, { signal: ctl });
+      if (r.ok) return res.json({ running: true, cli: CLI, port });
+    } catch {}
+  }
+  res.json({ running: false, cli: CLI });
 });
 
 // Start local replica
@@ -1653,17 +1660,23 @@ wss.on('connection', (ws, req) => {
         env: { ...process.env, HOME: process.env.HOME },
       });
 
+      let combined = '';
       child.stdout.on('data', (chunk) => {
+        combined += chunk.toString();
         ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
       });
       child.stderr.on('data', (chunk) => {
+        combined += chunk.toString();
         ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
       });
       child.on('close', (code) => {
+        // Treat "already running" as success — the replica is up, which is the caller's goal.
+        const alreadyRunning = /already\s+running/i.test(combined);
+        const ok = code === 0 || alreadyRunning;
         ws.send(
           JSON.stringify({
             type: 'status',
-            data: code === 0 ? 'replica-running' : 'replica-error',
+            data: ok ? 'replica-running' : 'replica-error',
           })
         );
       });
