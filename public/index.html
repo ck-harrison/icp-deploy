@@ -2085,24 +2085,36 @@
                   </button>
                 ))}
               </div>
-              {/* Open Live App link */}
-              {network === 'ic' && (() => {
+              {/* Open App link (live on ic, local replica otherwise) */}
+              {(network === 'ic' || network === 'local') && (() => {
                 const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
                 if (!fc) return null;
                 // Try deploy summary first (available on Deploy tab), then canister statuses
                 const cid = deploySummary?.canisters?.[fc.name]?.canisterId || canisterStatuses[fc.name]?.canisterId;
                 if (!cid || !isValidCanisterId(cid)) return null;
+                const isLocal = network === 'local';
+                const disabled = isLocal && !replicaRunning;
+                const href = isLocal ? `http://${cid}.localhost:4943` : `https://${cid}.icp0.io`;
+                const label = isLocal ? 'Open Local App' : 'Open Live App';
+                const title = disabled ? 'Start the local replica to open this app' : undefined;
+                const className = `flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${disabled ? 'bg-surface-800 border border-surface-700 text-gray-500 cursor-not-allowed' : 'bg-icp-500/10 border border-icp-500/30 text-icp-400 hover:bg-icp-500/20 hover:border-icp-500/50'}`;
+                const icon = (
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                  </svg>
+                );
+                if (disabled) {
+                  return (
+                    <span className={className} title={title}>
+                      {icon}
+                      {label}
+                    </span>
+                  );
+                }
                 return (
-                  <a
-                    href={`https://${cid}.icp0.io`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 px-4 py-2 bg-icp-500/10 border border-icp-500/30 rounded-xl text-icp-400 hover:bg-icp-500/20 hover:border-icp-500/50 transition-colors text-sm font-medium"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-                    </svg>
-                    Open Live App
+                  <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+                    {icon}
+                    {label}
                   </a>
                 );
               })()}
@@ -2527,23 +2539,36 @@
                   )}
                   </div>
 
-                  {/* Open Live App */}
-                  {network === 'ic' && (() => {
+                  {/* Open App (live on ic, local replica otherwise) */}
+                  {(network === 'ic' || network === 'local') && (() => {
                     const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
                     if (!fc) return null;
                     const cid = deploySummary?.canisters?.[fc.name]?.canisterId || canisterStatuses[fc.name]?.canisterId;
                     if (!cid || !isValidCanisterId(cid)) return null;
+                    const isLocal = network === 'local';
+                    const disabled = isLocal && !replicaRunning;
+                    const href = isLocal ? `http://${cid}.localhost:4943` : `https://${cid}.icp0.io`;
+                    const label = isLocal ? 'Open Local App' : 'Open Live App';
+                    const title = disabled ? 'Start the local replica to open this app' : undefined;
+                    const className = `mt-3 w-full flex items-center justify-center gap-2 py-3 rounded-2xl font-medium text-sm transition-colors ${disabled ? 'bg-surface-900 border border-surface-700 text-gray-500 cursor-not-allowed' : 'bg-surface-900 border border-icp-500/30 text-icp-400 hover:bg-icp-500/10 hover:border-icp-500/50'}`;
+                    const icon = (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                      </svg>
+                    );
+                    if (disabled) {
+                      return (
+                        <div className={className} title={title}>
+                          {icon}
+                          {label}
+                          <span className="text-[11px] text-gray-600 ml-1">— start replica</span>
+                        </div>
+                      );
+                    }
                     return (
-                      <a
-                        href={`https://${cid}.icp0.io`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="mt-3 w-full flex items-center justify-center gap-2 py-3 bg-surface-900 border border-icp-500/30 rounded-2xl text-icp-400 hover:bg-icp-500/10 hover:border-icp-500/50 transition-colors font-medium text-sm"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-                        </svg>
-                        Open Live App
+                      <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+                        {icon}
+                        {label}
                       </a>
                     );
                   })()}
