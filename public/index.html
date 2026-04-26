@@ -2246,14 +2246,12 @@
                           const name = prompt('New identity name:');
                           if (!name || !name.trim()) return;
                           try {
-                            const resp = await api.post('/api/identity/new', { name: name.trim() });
-                            const data = await resp.json();
+                            const data = await api.post('/api/identity/new', { name: name.trim() });
                             if (data.seed) {
                               alert('Identity created. Save your seed phrase:\\n\\n' + data.seed);
                             }
                             // Refresh identities and switch to new one
-                            const idResp = await api.get('/api/identities');
-                            const idData = await idResp.json();
+                            const idData = await api.get('/api/identities');
                             setIdentities(idData.identities || []);
                             setSelectedIdentity(name.trim());
                             await api.post('/api/identity/use', { name: name.trim() });
@@ -2275,11 +2273,9 @@
                           const newName = prompt('Rename "' + selectedIdentity + '" to:', selectedIdentity);
                           if (!newName || !newName.trim() || newName.trim() === selectedIdentity) return;
                           try {
-                            const resp = await api.post('/api/identity/rename', { oldName: selectedIdentity, newName: newName.trim() });
-                            const data = await resp.json();
+                            const data = await api.post('/api/identity/rename', { oldName: selectedIdentity, newName: newName.trim() });
                             if (data.error) { alert(data.error); return; }
-                            const idResp = await api.get('/api/identities');
-                            const idData = await idResp.json();
+                            const idData = await api.get('/api/identities');
                             setIdentities(idData.identities || []);
                             setSelectedIdentity(newName.trim());
                           } catch (err) {
@@ -2293,8 +2289,7 @@
                         onClick={async () => {
                           if (!selectedIdentity) return;
                           try {
-                            const resp = await api.post('/api/identity/export', { name: selectedIdentity });
-                            const data = await resp.json();
+                            const data = await api.post('/api/identity/export', { name: selectedIdentity });
                             if (data.error) { alert(data.error); return; }
                             const blob = new Blob([data.pem], { type: 'text/plain' });
                             const url = URL.createObjectURL(blob);
@@ -2322,12 +2317,10 @@
                             if (!name || !name.trim()) return;
                             const pem = await file.text();
                             try {
-                              const resp = await api.post('/api/identity/import', { name: name.trim(), pem });
-                              const data = await resp.json();
+                              const data = await api.post('/api/identity/import', { name: name.trim(), pem });
                               if (data.error) { alert(data.error); return; }
                               // Refresh identities and switch
-                              const idResp = await api.get('/api/identities');
-                              const idData = await idResp.json();
+                              const idData = await api.get('/api/identities');
                               setIdentities(idData.identities || []);
                               setSelectedIdentity(name.trim());
                               await api.post('/api/identity/use', { name: name.trim() });
