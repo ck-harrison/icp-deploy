@@ -313,6 +313,43 @@ function recordDeploy(projectPath, { canister, network, moduleHash, deployMode }
 
 const TOPUP_HISTORY_FILE = '.topup-history.json';
 
+// ---------- Auto cycles top-up ----------
+
+const AUTOTOPUP_FILE = '.autotopup.json';
+const DEFAULT_THRESHOLD = 1_000_000_000_000n; // 1T cycles
+const DEFAULT_TARGET = 2_000_000_000_000n;    // 2T cycles
+const MONITOR_INTERVAL_MS = 5 * 60 * 1000;    // 5 minutes
+const DEFAULT_COOLDOWN_MIN = 30;
+
+// Read/write the per-project .autotopup.json. Tolerate missing/corrupt file — return {}.
+function readAutoTopup(projectPath) {
+  const p = join(projectPath, AUTOTOPUP_FILE);
+  if (!existsSync(p)) return {};
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf-8'));
+    return (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAutoTopup(projectPath, data) {
+  try {
+    writeFileSync(join(projectPath, AUTOTOPUP_FILE), JSON.stringify(data, null, 2));
+  } catch {
+    // Non-fatal
+  }
+}
+
+// Parse a persisted positive-integer string into BigInt; null on anything malformed
+// so BigInt() can never throw on corrupt persisted data.
+function safeBigInt(value) {
+  if (value == null) return null;
+  const s = String(value);
+  if (!/^[0-9]+$/.test(s)) return null;
+  try { return BigInt(s); } catch { return null; }
+}
+
 function readTopupHistory(projectPath) {
   const histPath = join(projectPath, TOPUP_HISTORY_FILE);
   if (!existsSync(histPath)) return [];
@@ -324,13 +361,14 @@ function readTopupHistory(projectPath) {
   }
 }
 
-function recordTopup(projectPath, { canister, network, amount, success, output }) {
+function recordTopup(projectPath, { canister, network, amount, success, output, source }) {
   const entry = {
     canister,
     network,
     amount: String(amount),
     success,
     output: output || '',
+    source: source || 'cycles',
     timestamp: new Date().toISOString(),
   };
 
@@ -923,8 +961,44 @@ app.post('/api/canister/update-settings', (req, res) => {
   res.json({ ok: result.ok, output: result.data });
 });
 
+// Core mint+top-up+record body, shared by the manual endpoint and the auto monitor.
+// When source starts with 'icp'/'auto-icp', mint `amount` cycles first (mainnet),
+// then run `canister top-up`. Records the attempt to topup-history tagged with `source`
+// so manual ('cycles'/'icp') and automatic ('auto-cycles'/'auto-icp') entries are
+// distinguishable. amount is bigint-safe — always shelled out via String(amount).
+async function performTopUp({ projectPath, canister, network, amount, source }) {
+  const needsMint = source === 'icp' || source === 'auto-icp';
+
+  // If funding from ICP, mint the cycles first.
+  if (needsMint) {
+    // Mint targets the requested network; minting is a mainnet operation, so when
+    // the network is local/unset we still default to 'ic'.
+    const mintNetArgs = network && network !== 'local'
+      ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+      : (CLI === 'icp' ? ['-n', 'ic'] : []);
+    const mintCmd = CLI === 'icp'
+      ? ['cycles', 'mint', '--cycles', String(amount), ...mintNetArgs]
+      : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
+    const mintResult = await runCliAsync(mintCmd);
+    if (!mintResult.ok) {
+      if (projectPath) {
+        recordTopup(projectPath, { canister, network, amount, success: false, output: `Mint failed: ${mintResult.data}`, source });
+      }
+      return { ok: false, output: `Mint failed: ${mintResult.data}` };
+    }
+  }
+
+  // Top up from cycles balance.
+  const args = ['canister', 'top-up', canister, '--amount', String(amount), ...networkArgs(network)];
+  const result = await runCliAsync(args, projectPath);
+  if (projectPath) {
+    recordTopup(projectPath, { canister, network, amount, success: result.ok, output: result.data, source });
+  }
+  return { ok: result.ok, output: result.data };
+}
+
 // Top up a canister with cycles — rate limited (financial operation)
-app.post('/api/canister/top-up', rateLimit(60000, 5), (req, res) => {
+app.post('/api/canister/top-up', rateLimit(60000, 5), async (req, res) => {
   const { path: projectPath, canister, network, amount, source } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
   if (network && network !== 'local') {
@@ -934,32 +1008,8 @@ app.post('/api/canister/top-up', rateLimit(60000, 5), (req, res) => {
     return res.status(400).json({ error: 'amount must be a positive number of cycles' });
   }
 
-  // If source is 'icp', mint the cycles first
-  if (source === 'icp') {
-    // Mint targets the requested network; minting is a mainnet operation, so when
-    // the network is local/unset we still default to 'ic'.
-    const mintNetArgs = network && network !== 'local'
-      ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-      : (CLI === 'icp' ? ['-n', 'ic'] : []);
-    const mintCmd = CLI === 'icp'
-      ? ['cycles', 'mint', '--cycles', String(amount), ...mintNetArgs]
-      : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
-    const mintResult = runCliSync(mintCmd);
-    if (!mintResult.ok) {
-      if (projectPath) {
-        recordTopup(projectPath, { canister, network, amount, success: false, output: `Mint failed: ${mintResult.data}` });
-      }
-      return res.json({ ok: false, output: `Mint failed: ${mintResult.data}` });
-    }
-  }
-
-  // Top up from cycles balance
-  const args = ['canister', 'top-up', canister, '--amount', String(amount), ...networkArgs(network)];
-  const result = runCliSync(args, projectPath);
-  if (projectPath) {
-    recordTopup(projectPath, { canister, network, amount, success: result.ok, output: result.data, source: source || 'cycles' });
-  }
-  res.json({ ok: result.ok, output: result.data });
+  const result = await performTopUp({ projectPath, canister, network, amount, source: source || 'cycles' });
+  res.json({ ok: result.ok, output: result.output });
 });
 
 // Get top-up history for a project
@@ -967,6 +1017,297 @@ app.post('/api/topup-history', (req, res) => {
   const { path: projectPath } = req.body;
   if (!projectPath) return res.status(400).json({ error: 'path required' });
   res.json(readTopupHistory(projectPath));
+});
+
+// ---------- Auto cycles top-up: helpers ----------
+
+// Current cycles balance of a canister via `canister status`. Returns BigInt or null
+// (asset canister with no cycles line, unreachable, or unparseable).
+async function getCanisterCyclesAsync(canister, netArgs, cwd) {
+  const result = await runCliAsync(['canister', 'status', canister, ...netArgs], cwd);
+  if (!result.ok) return null;
+  const parsed = parseCanisterStatus(result.data);
+  return safeBigInt(parsed.cycles);
+}
+
+// Cycles balance of the controlling identity (same command + regex as
+// GET /api/cycles/identity-balance). Returns BigInt or null.
+async function getControllerCyclesBalance(network) {
+  const netArgs = network && network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
+  const result = await runCliAsync(cmd);
+  if (!result.ok) return null;
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  if (!match) return null;
+  return safeBigInt(match[1].replace(/[_,]/g, ''));
+}
+
+// ICP ledger balance of the controlling identity (same command + regex as
+// GET /api/ledger/balance). Returns Number or null.
+async function getControllerIcpBalance(network) {
+  const netArgs = network && network !== 'local'
+    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
+  const result = await runCliAsync(cmd);
+  if (!result.ok) return null;
+  const match = result.data.match(/([\d.]+)\s*ICP/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return isNaN(n) ? null : n;
+}
+
+// Register/dedupe a project in settings.autoTopupProjects so the monitor scans it.
+function registerAutoTopupProject(projectPath) {
+  const settings = readSettings();
+  const list = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+  if (!list.includes(projectPath)) {
+    list.push(projectPath);
+    settings.autoTopupProjects = list;
+    writeSettings(settings);
+  }
+}
+
+// Remove a project from autoTopupProjects when its .autotopup.json has no enabled
+// canister across any network (so the monitor stops scanning a project with nothing on).
+function pruneAutoTopupProject(projectPath) {
+  const data = readAutoTopup(projectPath);
+  let hasEnabled = false;
+  for (const network of Object.keys(data)) {
+    const canisters = data[network];
+    if (!canisters || typeof canisters !== 'object') continue;
+    for (const cfg of Object.values(canisters)) {
+      if (cfg && cfg.enabled) { hasEnabled = true; break; }
+    }
+    if (hasEnabled) break;
+  }
+  if (hasEnabled) return;
+  const settings = readSettings();
+  const list = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+  const filtered = list.filter(p => p !== projectPath);
+  if (filtered.length !== list.length) {
+    settings.autoTopupProjects = filtered;
+    writeSettings(settings);
+  }
+}
+
+// ---------- Auto cycles top-up: monitor ----------
+
+let monitorRunning = false;
+
+// Run one monitor pass. Returns an array of action records:
+//   { project, network, canister, action: 'topped-up'|'skipped', reason, amount? }
+// Never throws — one bad project can't abort the loop. All cycle math is BigInt.
+async function runAutoTopupPass() {
+  if (monitorRunning) return [];
+  monitorRunning = true;
+  const actions = [];
+  try {
+    const settings = readSettings();
+    if (settings.autoTopupEnabled === false) return actions;
+
+    const reserveCycles = safeBigInt(settings.autoTopupReserveCycles) ?? 0n;
+    const reserveIcp = Number(settings.autoTopupReserveIcp || 0) || 0;
+    const cooldownMin = settings.autoTopupCooldownMinutes ?? DEFAULT_COOLDOWN_MIN;
+    const cooldownMs = (Number(cooldownMin) || DEFAULT_COOLDOWN_MIN) * 60000;
+
+    const projects = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+
+    for (const projectPath of projects) {
+      try {
+        if (!existsSync(join(projectPath, AUTOTOPUP_FILE))) continue;
+        const data = readAutoTopup(projectPath);
+
+        for (const network of Object.keys(data)) {
+          if (network === 'local') continue;
+          const canisters = data[network];
+          if (!canisters || typeof canisters !== 'object') continue;
+
+          for (const canister of Object.keys(canisters)) {
+            const cfg = canisters[canister];
+            if (!cfg || !cfg.enabled) continue;
+
+            const rec = (action, reason, amount) => {
+              const a = { project: projectPath, network, canister, action, reason };
+              if (amount !== undefined) a.amount = amount;
+              actions.push(a);
+            };
+
+            // Cooldown guard
+            const now = Date.now();
+            if (cfg.lastTopupAt) {
+              const last = Date.parse(cfg.lastTopupAt);
+              if (!isNaN(last) && now < last + cooldownMs) {
+                rec('skipped', 'cooldown');
+                continue;
+              }
+            }
+
+            // Daily cap guard
+            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+            const spent = (cfg.spent && cfg.spent.date === today) ? (safeBigInt(cfg.spent.cycles) ?? 0n) : 0n;
+            const cap = cfg.dailyCapCycles ? safeBigInt(cfg.dailyCapCycles) : null;
+            if (cap !== null && spent >= cap) {
+              rec('skipped', 'daily-cap-reached');
+              continue;
+            }
+
+            const threshold = safeBigInt(cfg.thresholdCycles) ?? DEFAULT_THRESHOLD;
+            const target = safeBigInt(cfg.targetCycles) ?? DEFAULT_TARGET;
+
+            // Current canister cycles
+            const cycles = await getCanisterCyclesAsync(canister, networkArgs(network), projectPath);
+            if (cycles === null) { rec('skipped', 'status-unavailable'); continue; }
+            if (cycles >= threshold) { rec('skipped', 'above-threshold'); continue; }
+
+            // Desired refill amount, bounded by remaining daily cap
+            let amount = target - cycles;
+            if (cap !== null) {
+              const remaining = cap - spent;
+              if (remaining < amount) amount = remaining;
+            }
+            if (amount <= 0n) { rec('skipped', 'cap-exhausted'); continue; }
+
+            // Available cycles from the controller, honouring the reserve floor
+            const cyclesBal = await getControllerCyclesBalance(network);
+            const availCycles = cyclesBal == null
+              ? 0n
+              : (cyclesBal > reserveCycles ? cyclesBal - reserveCycles : 0n);
+
+            let r;
+            let spentNow;
+            if (availCycles >= amount) {
+              // Fully fundable from existing cycles
+              r = await performTopUp({ projectPath, canister, network, amount, source: 'auto-cycles' });
+              spentNow = amount;
+            } else {
+              // Cycles short — fall back to minting from ICP for the shortfall
+              const icpBal = await getControllerIcpBalance(network);
+              if (icpBal != null && icpBal > reserveIcp) {
+                if (availCycles > 0n) {
+                  await performTopUp({ projectPath, canister, network, amount: availCycles, source: 'auto-cycles' });
+                }
+                r = await performTopUp({ projectPath, canister, network, amount: amount - availCycles, source: 'auto-icp' });
+                spentNow = amount;
+              } else {
+                rec('skipped', 'insufficient-funds (cycles short, ICP below reserve)');
+                continue;
+              }
+            }
+
+            if (r && r.ok) {
+              cfg.lastTopupAt = new Date().toISOString();
+              cfg.spent = { date: today, cycles: String(spent + spentNow) };
+              writeAutoTopup(projectPath, data);
+              rec('topped-up', 'below-threshold', String(spentNow));
+            } else {
+              // Do not update runtime state on failure.
+              rec('skipped', 'topup-failed: ' + (r ? r.output : 'unknown'));
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Auto top-up: error processing project ${projectPath}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error('Auto top-up pass error:', e.message);
+  } finally {
+    monitorRunning = false;
+  }
+  return actions;
+}
+
+function startAutoTopupMonitor() {
+  setInterval(() => {
+    runAutoTopupPass().catch((e) => console.error('Auto top-up interval error:', e.message));
+  }, MONITOR_INTERVAL_MS);
+}
+
+// ---------- Auto cycles top-up: endpoints ----------
+
+// Enable/disable and configure auto top-up for one canister.
+app.post('/api/autotopup/config', (req, res) => {
+  const { path: projectPath, network, canister, enabled, thresholdCycles, targetCycles, dailyCapCycles } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (network === 'local') return res.status(400).json({ error: 'Auto top-up is not available for the local network' });
+
+  const isPosInt = (v) => typeof v === 'string' && /^[0-9]+$/.test(v) && BigInt(v) > 0n;
+
+  // Validate optional override fields when present.
+  if (thresholdCycles !== undefined && !isPosInt(thresholdCycles)) {
+    return res.status(400).json({ error: 'thresholdCycles must be a positive integer string' });
+  }
+  if (targetCycles !== undefined && !isPosInt(targetCycles)) {
+    return res.status(400).json({ error: 'targetCycles must be a positive integer string' });
+  }
+  if (dailyCapCycles !== undefined && dailyCapCycles !== null && !isPosInt(dailyCapCycles)) {
+    return res.status(400).json({ error: 'dailyCapCycles must be a positive integer string or null' });
+  }
+
+  const data = readAutoTopup(projectPath);
+  if (!data[network] || typeof data[network] !== 'object') data[network] = {};
+  const existing = (data[network][canister] && typeof data[network][canister] === 'object') ? data[network][canister] : {};
+
+  // Resolve effective threshold/target (override → existing → default) so we can
+  // enforce threshold < target regardless of which were supplied this call.
+  const effThreshold = thresholdCycles !== undefined
+    ? thresholdCycles
+    : (existing.thresholdCycles ?? String(DEFAULT_THRESHOLD));
+  const effTarget = targetCycles !== undefined
+    ? targetCycles
+    : (existing.targetCycles ?? String(DEFAULT_TARGET));
+  if (BigInt(effThreshold) >= BigInt(effTarget)) {
+    return res.status(400).json({ error: 'thresholdCycles must be less than targetCycles' });
+  }
+
+  // Daily cap: explicit value or null; preserve existing if not supplied.
+  let effCap;
+  if (dailyCapCycles !== undefined) effCap = dailyCapCycles === null ? null : dailyCapCycles;
+  else effCap = existing.dailyCapCycles ?? null;
+
+  const merged = {
+    ...existing, // preserves runtime fields (lastTopupAt, spent)
+    enabled: !!enabled,
+    thresholdCycles: effThreshold,
+    targetCycles: effTarget,
+    dailyCapCycles: effCap,
+  };
+
+  data[network][canister] = merged;
+  writeAutoTopup(projectPath, data);
+
+  // Keep the project registry in sync with whether anything is enabled.
+  if (merged.enabled) registerAutoTopupProject(projectPath);
+  else pruneAutoTopupProject(projectPath);
+
+  res.json({ ok: true, config: merged });
+});
+
+// Return the whole .autotopup.json for a project plus the global settings.
+app.post('/api/autotopup/status', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  const settings = readSettings();
+  res.json({
+    config: readAutoTopup(projectPath),
+    global: {
+      autoTopupEnabled: settings.autoTopupEnabled !== false,
+      reserveCycles: settings.autoTopupReserveCycles ?? '0',
+      reserveIcp: settings.autoTopupReserveIcp ?? '0',
+      cooldownMinutes: settings.autoTopupCooldownMinutes ?? DEFAULT_COOLDOWN_MIN,
+    },
+  });
+});
+
+// Run one monitor pass immediately — rate limited (spends funds).
+app.post('/api/autotopup/run-now', rateLimit(60000, 10), async (_req, res) => {
+  const actions = await runAutoTopupPass();
+  res.json({ ok: true, actions });
 });
 
 // ---------- Canister snapshots ----------
@@ -1844,7 +2185,8 @@ app.get('/api/settings', (_req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const ALLOWED_KEYS = ['lastProject', 'lastNetwork', 'buildBeforeDeploy', 'recentProjects'];
+  const ALLOWED_KEYS = ['lastProject', 'lastNetwork', 'buildBeforeDeploy', 'recentProjects',
+    'autoTopupEnabled', 'autoTopupProjects', 'autoTopupReserveCycles', 'autoTopupReserveIcp', 'autoTopupCooldownMinutes'];
   const current = readSettings();
   const filtered = Object.fromEntries(
     Object.entries(req.body).filter(([k]) => ALLOWED_KEYS.includes(k))
@@ -1886,4 +2228,5 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  ICP Deploy`);
   console.log(`  --------------------`);
   console.log(`  Open http://localhost:${PORT}\n`);
+  startAutoTopupMonitor();
 });
