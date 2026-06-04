@@ -14,3 +14,14 @@
 - **icp vs dfx args**: `icp` uses `-e <env>`, `dfx` uses `--network <net>`. Always go through `networkArgs()`.
 - **icp.yaml canister formats**: Both inline (`- name: foo`) and directory-reference (`- path/to/dir` with `canister.yaml` inside) must be handled.
 - **CSRF**: All API calls require `X-Requested-With: CanisterPanel` header.
+
+---
+
+## Quality gate
+
+No typecheck/lint/test scripts configured. Run before reporting done:
+1. Grep `src/` for raw hex values: `grep -rn -E '#[0-9A-Fa-f]{3,8}\b' src/ 2>/dev/null`
+2. Grep for hardcoded hosts (anything that isn't localhost or a design token reference)
+3. Self-review: re-read the diff for logical errors
+
+Report each check explicitly. "All good" is not a gate result.

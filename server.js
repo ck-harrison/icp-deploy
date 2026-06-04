@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { createHash } from 'crypto';
 import { gunzipSync } from 'zlib';
-import { join, dirname, resolve } from 'path';
+import { join, dirname, resolve, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -26,10 +26,17 @@ function rateLimit(windowMs, maxRequests) {
     if (!rateLimitMap.has(key)) rateLimitMap.set(key, []);
     const timestamps = rateLimitMap.get(key).filter(t => now - t < windowMs);
     if (timestamps.length >= maxRequests) {
+      // Refresh the stored (filtered) timestamps so stale entries don't linger.
+      rateLimitMap.set(key, timestamps);
       return res.status(429).json({ error: 'Too many requests — try again later' });
     }
     timestamps.push(now);
-    rateLimitMap.set(key, timestamps);
+    if (timestamps.length === 0) {
+      // After filtering, no live timestamps remain — drop the key so the map doesn't leak.
+      rateLimitMap.delete(key);
+    } else {
+      rateLimitMap.set(key, timestamps);
+    }
     next();
   };
 }
@@ -97,8 +104,9 @@ function assertSafeName(name, label = 'name') {
 const HOME = process.env.HOME;
 function assertSafePath(p, label = 'path') {
   if (!p) throw new Error(`${label} required`);
+  if (!HOME) throw new Error('HOME environment variable is not set');
   const resolved = resolve(p);
-  if (!resolved.startsWith(HOME)) {
+  if (resolved !== HOME && !resolved.startsWith(HOME + sep)) {
     throw new Error(`${label} must be within your home directory`);
   }
   return resolved;
@@ -123,7 +131,7 @@ function detectCli() {
   return 'icp'; // default to modern CLI
 }
 
-const CLI = detectCli();
+let CLI = detectCli();
 
 // Map between dfx and icp CLI argument differences
 function networkArgs(network) {
@@ -143,8 +151,18 @@ function getCanisterId(canister, netArgs, cwd) {
   return runCliSync(['canister', 'id', canister, ...netArgs], cwd);
 }
 
+// Async sibling of getCanisterId — for batch endpoints that must not block the event loop.
+function getCanisterIdAsync(canister, netArgs, cwd) {
+  if (CLI === 'icp') {
+    return runCliAsync(['canister', 'status', canister, '--id-only', ...netArgs], cwd);
+  }
+  return runCliAsync(['canister', 'id', canister, ...netArgs], cwd);
+}
+
 // Secure: uses spawnSync with argument arrays — no shell interpolation
-function runCliSync(args, cwd) {
+// If the CLI binary has gone missing (ENOENT) — e.g. the user switched/installed
+// a CLI after startup — re-detect once and retry, so a server restart isn't needed.
+function runCliSync(args, cwd, _retried = false) {
   try {
     const result = spawnSync(CLI, args, {
       cwd,
@@ -152,6 +170,10 @@ function runCliSync(args, cwd) {
       timeout: 30000,
       env: { ...process.env, HOME: process.env.HOME },
     });
+    if (result.error && result.error.code === 'ENOENT' && !_retried) {
+      CLI = detectCli();
+      return runCliSync(args, cwd, true);
+    }
     if (result.status === 0) {
       return { ok: true, data: (result.stdout || '').trim() };
     }
@@ -159,6 +181,83 @@ function runCliSync(args, cwd) {
   } catch (e) {
     return { ok: false, data: e.message };
   }
+}
+
+// Async sibling of runCliSync — uses spawn so it doesn't block the event loop.
+// Same { ok, data } shape and same 30s timeout (kills the child on timeout).
+// On spawn error (e.g. ENOENT) re-detects the CLI once and retries; never rejects.
+function runCliAsync(args, cwd, _retried = false) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(CLI, args, {
+        cwd,
+        env: { ...process.env, HOME: process.env.HOME },
+      });
+    } catch (e) {
+      resolve({ ok: false, data: e.message });
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      try { child.kill('SIGTERM'); } catch (_) {}
+    }, 30000);
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('error', (err) => {
+      if (err.code === 'ENOENT' && !_retried) {
+        // CLI binary missing — re-detect once and retry.
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          CLI = detectCli();
+          runCliAsync(args, cwd, true).then(resolve);
+        }
+        return;
+      }
+      finish({ ok: false, data: err.message });
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        finish({ ok: true, data: stdout.trim() });
+      } else {
+        finish({ ok: false, data: (stderr || stdout).trim() });
+      }
+    });
+  });
+}
+
+// Run an async mapper over items with a bounded concurrency limit (no deps).
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 // ---------- Deploy history ----------
@@ -715,35 +814,42 @@ app.post('/api/canisters/status-all', async (req, res) => {
   const { path: projectPath, network, canisterNames } = req.body;
   if (!projectPath) return res.status(400).json({ error: 'path required' });
 
-  const netArgs = networkArgs(network);
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
   const canisterIds = readCanisterIds(projectPath);
   const results = {};
 
-  const names = canisterNames || [];
-  for (const name of names) {
-    try { assertSafeName(name, 'canister'); } catch { continue; }
+  const names = (canisterNames || []).filter((name) => {
+    try { assertSafeName(name, 'canister'); return true; } catch { return false; }
+  });
 
-    const idResult = getCanisterId(name, netArgs, projectPath);
-    const canisterId = idResult.ok ? idResult.data : null;
+  await mapWithConcurrency(names, 4, async (name) => {
+    // Resolve the canister ID from canister_ids.json first; only fall back to the
+    // CLI (an extra spawn) when the file doesn't have it.
     const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
+    let canisterId = idsJsonId;
+    if (!canisterId) {
+      const idResult = await getCanisterIdAsync(name, netArgs, projectPath);
+      canisterId = idResult.ok ? idResult.data : null;
+    }
 
-    const statusResult = runCliSync(['canister', 'status', name, ...netArgs], projectPath);
+    const statusResult = await runCliAsync(['canister', 'status', name, ...netArgs], projectPath);
 
     if (statusResult.ok) {
       const parsed = parseCanisterStatus(statusResult.data);
       results[name] = {
         canister: name,
-        canisterId: canisterId || idsJsonId || null,
+        canisterId: canisterId || null,
         ...parsed,
       };
     } else {
       results[name] = {
         canister: name,
-        canisterId: canisterId || idsJsonId || null,
+        canisterId: canisterId || null,
         error: statusResult.data,
       };
     }
-  }
+  });
 
   // Enrich with deploy history version info
   const history = readDeployHistory(projectPath);
@@ -821,14 +927,22 @@ app.post('/api/canister/update-settings', (req, res) => {
 app.post('/api/canister/top-up', rateLimit(60000, 5), (req, res) => {
   const { path: projectPath, canister, network, amount, source } = req.body;
   try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (network && network !== 'local') {
+    try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
   if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
     return res.status(400).json({ error: 'amount must be a positive number of cycles' });
   }
 
   // If source is 'icp', mint the cycles first
   if (source === 'icp') {
+    // Mint targets the requested network; minting is a mainnet operation, so when
+    // the network is local/unset we still default to 'ic'.
+    const mintNetArgs = network && network !== 'local'
+      ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
+      : (CLI === 'icp' ? ['-n', 'ic'] : []);
     const mintCmd = CLI === 'icp'
-      ? ['cycles', 'mint', '--cycles', String(amount), '-n', 'ic']
+      ? ['cycles', 'mint', '--cycles', String(amount), ...mintNetArgs]
       : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
     const mintResult = runCliSync(mintCmd);
     if (!mintResult.ok) {
@@ -1056,29 +1170,34 @@ app.post('/api/deploy/summary', async (req, res) => {
   const { path: projectPath, network, canisterNames } = req.body;
   if (!projectPath) return res.status(400).json({ error: 'path required' });
 
-  const netArgs = networkArgs(network);
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
   const summary = { canisters: {} };
 
   // Per-canister: deployed module hash vs local WASM hash
-  const names = canisterNames || [];
+  const names = (canisterNames || []).filter((name) => {
+    try { assertSafeName(name, 'canister'); return true; } catch { return false; }
+  });
   const canisterIds = readCanisterIds(projectPath);
 
-  for (const name of names) {
-    try { assertSafeName(name, 'canister'); } catch { continue; }
-
+  await mapWithConcurrency(names, 4, async (name) => {
     const entry = { deployed: false, canisterId: null, moduleHash: null, localWasm: null, status: null };
 
-    // Get canister ID
-    const idResult = getCanisterId(name, netArgs, projectPath);
-    // Try CLI first, then check canister_ids.json for any matching network key
+    // Resolve canister ID from canister_ids.json first; only fall back to the CLI
+    // (an extra spawn) when the file doesn't have it.
     const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
-    entry.canisterId = idResult.ok ? idResult.data : (idsJsonId || null);
+    if (idsJsonId) {
+      entry.canisterId = idsJsonId;
+    } else {
+      const idResult = await getCanisterIdAsync(name, netArgs, projectPath);
+      entry.canisterId = idResult.ok ? idResult.data : null;
+    }
 
     if (entry.canisterId) {
       entry.deployed = true;
 
       // Get deployed status + module hash from canister status (works for both icp and dfx)
-      const statusResult = runCliSync(['canister', 'status', name, ...netArgs], projectPath);
+      const statusResult = await runCliAsync(['canister', 'status', name, ...netArgs], projectPath);
       if (statusResult.ok) {
         const statusMatch = statusResult.data.match(/Status:\s*(\w+)/i);
         entry.status = statusMatch ? statusMatch[1] : null;
@@ -1088,7 +1207,7 @@ app.post('/api/deploy/summary', async (req, res) => {
 
       // Fallback: try canister info (dfx only, icp CLI doesn't have this)
       if (!entry.moduleHash && CLI !== 'icp') {
-        const infoResult = runCliSync(['canister', 'info', name, ...netArgs], projectPath);
+        const infoResult = await runCliAsync(['canister', 'info', name, ...netArgs], projectPath);
         if (infoResult.ok) {
           const hashMatch = infoResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
           entry.moduleHash = hashMatch ? hashMatch[1] : null;
@@ -1141,7 +1260,7 @@ app.post('/api/deploy/summary', async (req, res) => {
     }
 
     summary.canisters[name] = entry;
-  }
+  });
 
   // Look up deploy history for version info
   const history = readDeployHistory(projectPath);
@@ -1355,14 +1474,22 @@ app.post('/api/replica/start', (req, res) => {
   });
 
   let output = '';
+  let responded = false;
   child.stdout.on('data', (d) => (output += d.toString()));
   child.stderr.on('data', (d) => (output += d.toString()));
   child.on('close', (code) => {
+    if (responded) return;
+    responded = true;
     if (code === 0) {
       res.json({ ok: true, output });
     } else {
       res.status(500).json({ error: output });
     }
+  });
+  child.on('error', (err) => {
+    if (responded) return;
+    responded = true;
+    res.status(500).json({ error: err.message });
   });
 });
 
@@ -1380,8 +1507,11 @@ app.post('/api/browse', (req, res) => {
   const target = dirPath || home;
 
   // Restrict browsing to home directory and below
+  if (!home) {
+    return res.status(500).json({ error: 'HOME environment variable is not set' });
+  }
   const resolved = resolve(target);
-  if (!resolved.startsWith(home)) {
+  if (resolved !== home && !resolved.startsWith(home + sep)) {
     return res.status(403).json({ error: 'Cannot browse outside home directory' });
   }
 
@@ -1404,7 +1534,7 @@ app.post('/api/browse', (req, res) => {
 
     const parentPath = dirname(resolved);
     // Don't let parent go above home
-    const safeParent = parentPath.startsWith(home) ? parentPath : home;
+    const safeParent = (parentPath === home || parentPath.startsWith(home + sep)) ? parentPath : home;
     res.json({ current: resolved, parent: safeParent, entries });
   } catch (e) {
     res.status(500).json({ error: 'Failed to browse directory' });
@@ -1528,6 +1658,21 @@ wss.on('connection', (ws, req) => {
 
       let deployOutput = '';
 
+      // Cancel handler — wired once per deploy and removed when the deploy ends,
+      // so listeners don't accumulate across deploys and a cancel only kills
+      // the current deploy's child.
+      const onCancel = (innerRaw) => {
+        try {
+          const innerMsg = JSON.parse(innerRaw);
+          if (innerMsg.action === 'cancel') {
+            child.kill('SIGTERM');
+            ws.send(JSON.stringify({ type: 'log', data: '\n--- Deploy cancelled ---' }));
+            ws.send(JSON.stringify({ type: 'status', data: 'cancelled' }));
+          }
+        } catch {}
+      };
+      ws.on('message', onCancel);
+
       child.stdout.on('data', (chunk) => {
         const text = chunk.toString();
         deployOutput += text;
@@ -1541,6 +1686,9 @@ wss.on('connection', (ws, req) => {
       });
 
       child.on('close', (code) => {
+        // Remove the cancel listener now that this deploy has ended.
+        ws.removeListener('message', onCancel);
+
         if (code === 0 && projectPath) {
           // Record deploy history for each deployed canister
           const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
@@ -1561,8 +1709,8 @@ wss.on('connection', (ws, req) => {
         let finalStatus = code === 0 ? 'success' : 'error';
 
         // Determine which canisters succeeded/failed
-        const failedSync = [...deployOutput.matchAll(/Failed to sync canister '(\w+)'/g)].map(m => m[1]);
-        const failedInstall = [...deployOutput.matchAll(/Failed to install.*?'(\w+)'/g)].map(m => m[1]);
+        const failedSync = [...deployOutput.matchAll(/Failed to sync canister '([\w-]+)'/g)].map(m => m[1]);
+        const failedInstall = [...deployOutput.matchAll(/Failed to install.*?'([\w-]+)'/g)].map(m => m[1]);
         const allFailed = [...new Set([...failedSync, ...failedInstall])];
         const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
         const succeeded = deployedNames.filter(n => !allFailed.includes(n));
@@ -1612,28 +1760,13 @@ wss.on('connection', (ws, req) => {
       });
 
       child.on('error', (err) => {
+        ws.removeListener('message', onCancel);
         ws.send(
           JSON.stringify({
             type: 'error',
             data: `Spawn error: ${err.message}`,
           })
         );
-      });
-
-      // Allow cancel
-      ws.on('message', (innerRaw) => {
-        try {
-          const innerMsg = JSON.parse(innerRaw);
-          if (innerMsg.action === 'cancel') {
-            child.kill('SIGTERM');
-            ws.send(
-              JSON.stringify({ type: 'log', data: '\n--- Deploy cancelled ---' })
-            );
-            ws.send(
-              JSON.stringify({ type: 'status', data: 'cancelled' })
-            );
-          }
-        } catch {}
       });
     }
 
@@ -1661,6 +1794,7 @@ wss.on('connection', (ws, req) => {
       });
 
       let combined = '';
+      let replicaSettled = false;
       child.stdout.on('data', (chunk) => {
         combined += chunk.toString();
         ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
@@ -1670,6 +1804,8 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
       });
       child.on('close', (code) => {
+        if (replicaSettled) return;
+        replicaSettled = true;
         // Treat "already running" as success — the replica is up, which is the caller's goal.
         const alreadyRunning = /already\s+running/i.test(combined);
         const ok = code === 0 || alreadyRunning;
@@ -1679,6 +1815,12 @@ wss.on('connection', (ws, req) => {
             data: ok ? 'replica-running' : 'replica-error',
           })
         );
+      });
+      child.on('error', (err) => {
+        if (replicaSettled) return;
+        replicaSettled = true;
+        ws.send(JSON.stringify({ type: 'log', data: `Spawn error: ${err.message}` }));
+        ws.send(JSON.stringify({ type: 'status', data: 'replica-error' }));
       });
     }
   });
