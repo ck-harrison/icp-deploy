@@ -1507,6 +1507,246 @@
     }
 
     // ---- Main App ----
+    // ---- Fleet Tab (all production canisters across recent projects) ----
+    function FleetTab({ fleet, loading, error, onRefresh, onTopUp, onAutoTopUp }) {
+      const [showInaccessible, setShowInaccessible] = useState(false);
+
+      const formatCycles = (c) => {
+        if (!c) return '—';
+        let big = null;
+        try { big = BigInt(String(c).replace(/[^0-9]/g, '')); } catch {}
+        if (big === null) return '—';
+        const n = Number(big);
+        if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+        if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+        if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+        return n.toLocaleString();
+      };
+
+      const getCyclesHealth = (c) => {
+        if (c == null) return 'unknown';
+        const n = Number(c);
+        if (n >= 1e12) return 'great';
+        if (n >= 1e11) return 'good';
+        if (n >= 1e10) return 'low';
+        return 'critical';
+      };
+
+      const healthColors = { great: 'text-green-400', good: 'text-blue-400', low: 'text-yellow-400', critical: 'text-red-400', unknown: 'text-gray-500' };
+      const healthBarColors = { great: 'bg-green-400', good: 'bg-blue-400', low: 'bg-yellow-400', critical: 'bg-red-400', unknown: 'bg-gray-600' };
+      const healthBarWidth = { great: 'w-full', good: 'w-3/4', low: 'w-1/3', critical: 'w-[10%]', unknown: 'w-0' };
+
+      const entries = fleet?.canisters || [];
+      const accessible = entries.filter((e) => !e.error);
+      const inaccessible = entries.filter((e) => e.error);
+
+      // Summary numbers (BigInt-safe — cycles balances overflow Number territory fast)
+      let totalCycles = 0n;
+      let criticalCount = 0;
+      let lowCount = 0;
+      for (const e of accessible) {
+        if (!e.cycles) continue;
+        try { totalCycles += BigInt(String(e.cycles).replace(/[^0-9]/g, '') || '0'); } catch {}
+        const h = getCyclesHealth(e.cycles);
+        if (h === 'critical') criticalCount++;
+        if (h === 'low') lowCount++;
+      }
+
+      // Group by project, preserving recent-project order from the server
+      const groups = [];
+      for (const e of accessible) {
+        let g = groups.find((x) => x.path === e.project);
+        if (!g) { g = { path: e.project, name: e.projectName, items: [] }; groups.push(g); }
+        g.items.push(e);
+      }
+
+      return (
+        <div className="space-y-4">
+          {/* Header bar */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-white">Production Canisters</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                All mainnet canisters across your recent projects
+                {fleet?.identity ? <span> — identity <span className="text-gray-400 font-mono">{fleet.identity}</span></span> : null}
+              </p>
+            </div>
+            <button
+              onClick={onRefresh}
+              disabled={loading}
+              className="flex items-center gap-2 px-4 py-2 bg-icp-500/10 text-icp-400 border border-icp-500/20 rounded-xl text-sm font-medium hover:bg-icp-500/20 disabled:opacity-50 transition-colors"
+            >
+              {loading ? (
+                <><SpinnerIcon className="w-4 h-4" /> Scanning...</>
+              ) : (
+                <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" /></svg> Refresh</>
+              )}
+            </button>
+          </div>
+
+          {/* Network indicator */}
+          <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm bg-orange-500/10 border border-orange-500/20 text-orange-300">
+            <div className="w-2 h-2 rounded-full bg-orange-400" />
+            Production (ic) — scanned {fleet?.projectsScanned ?? 0} recent project(s)
+          </div>
+
+          {error && (
+            <div className="px-4 py-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">
+              Fleet scan failed: {error}
+            </div>
+          )}
+
+          {loading && entries.length === 0 ? (
+            <div className="flex items-center justify-center py-16 text-gray-500 gap-3">
+              <SpinnerIcon className="w-5 h-5" /> Checking canister status across projects — this can take a moment...
+            </div>
+          ) : !error && entries.length === 0 && fleet ? (
+            <div className="px-5 py-10 text-center bg-surface-900 border border-surface-700 rounded-2xl">
+              <p className="text-sm text-gray-400">No production canisters found.</p>
+              <p className="text-xs text-gray-600 mt-1.5">Canisters are discovered from your recent projects — load each project once on the Deploy tab and it will be scanned here.</p>
+            </div>
+          ) : entries.length > 0 && (
+            <React.Fragment>
+              {/* Summary strip */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl px-4 py-3">
+                  <p className="text-[11px] text-gray-500">Canisters</p>
+                  <p className="text-lg font-bold text-white mt-0.5">{accessible.length}</p>
+                </div>
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl px-4 py-3">
+                  <p className="text-[11px] text-gray-500">Total cycles</p>
+                  <p className="text-lg font-bold text-green-400 mt-0.5 font-mono">{formatCycles(totalCycles)}</p>
+                </div>
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl px-4 py-3">
+                  <p className="text-[11px] text-gray-500">Low (&lt;100B)</p>
+                  <p className={`text-lg font-bold mt-0.5 ${lowCount > 0 ? 'text-yellow-400' : 'text-gray-600'}`}>{lowCount}</p>
+                </div>
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl px-4 py-3">
+                  <p className="text-[11px] text-gray-500">Critical (&lt;10B)</p>
+                  <p className={`text-lg font-bold mt-0.5 ${criticalCount > 0 ? 'text-red-400' : 'text-gray-600'}`}>{criticalCount}</p>
+                </div>
+              </div>
+
+              {/* Per-project groups */}
+              {groups.map((g) => (
+                <div key={g.path} className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-surface-700 flex items-center justify-between">
+                    <span className="text-sm font-semibold text-white">{g.name}</span>
+                    <span className="text-[11px] text-gray-600 font-mono truncate max-w-[50%]" title={g.path}>{g.path}</span>
+                  </div>
+                  <div className="divide-y divide-surface-700/60">
+                    {g.items.map((e) => {
+                      const health = getCyclesHealth(e.cycles);
+                      const isRunning = e.runningStatus === 'Running';
+                      const isStopped = e.runningStatus === 'Stopped';
+                      let daysLeft = null;
+                      try {
+                        const cyc = e.cycles ? BigInt(e.cycles) : null;
+                        const burn = e.idleBurnPerDay ? BigInt(e.idleBurnPerDay) : null;
+                        if (cyc !== null && burn !== null && burn > 0n) daysLeft = Number(cyc / burn);
+                      } catch {}
+                      return (
+                        <div key={e.canisterId} className="px-5 py-3.5 flex items-center gap-4 flex-wrap">
+                          {/* Name + ID */}
+                          <div className="flex-1 min-w-[180px]">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-semibold text-white">{e.name}</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                                e.type === 'motoko' ? 'bg-purple-500/20 text-purple-300' :
+                                e.type === 'rust' ? 'bg-orange-500/20 text-orange-300' :
+                                e.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
+                                'bg-gray-500/20 text-gray-300'
+                              }`}>{e.type}</span>
+                              {e.autoTopup?.enabled && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-green-500/20 text-green-300" title="Auto top-up enabled">Auto</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 mt-1">
+                              <p className="text-[11px] text-gray-500 font-mono truncate" title={e.canisterId}>{e.canisterId}</p>
+                              {isValidCanisterId(e.canisterId) && (
+                                <a href={`https://dashboard.internetcomputer.org/canister/${e.canisterId}`} target="_blank" rel="noopener noreferrer" className="text-[10px] px-1.5 py-0.5 bg-surface-800 text-gray-500 border border-surface-700 rounded hover:text-gray-300 transition-colors shrink-0" title="View on ICP Dashboard">Dashboard</a>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Status pill */}
+                          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium shrink-0 ${
+                            isRunning ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                              : isStopped ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                              : 'bg-gray-500/10 text-gray-400 border border-gray-500/20'
+                          }`}>
+                            <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-green-400' : isStopped ? 'bg-red-400' : 'bg-gray-400'}`} />
+                            {e.runningStatus || 'unknown'}
+                          </div>
+
+                          {/* Cycles */}
+                          <div className="w-36 shrink-0">
+                            <div className="flex items-baseline justify-between">
+                              <span className="text-[10px] text-gray-600">Cycles</span>
+                              <span className={`text-sm font-bold font-mono ${healthColors[health]}`}>{formatCycles(e.cycles)}</span>
+                            </div>
+                            <div className="h-1.5 bg-surface-800 rounded-full overflow-hidden mt-1">
+                              <div className={`h-full rounded-full ${healthBarColors[health]} ${healthBarWidth[health]}`} />
+                            </div>
+                            <p className="text-[10px] text-gray-600 mt-1 text-right">
+                              {daysLeft !== null ? `~${daysLeft.toLocaleString()} days at idle burn` : ' '}
+                            </p>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              onClick={() => onTopUp(e)}
+                              className="px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors"
+                            >Top Up</button>
+                            <button
+                              onClick={() => onAutoTopUp(e)}
+                              className={`px-3 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                                e.autoTopup?.enabled
+                                  ? 'bg-green-500/10 text-green-400 border-green-500/20 hover:bg-green-500/20'
+                                  : 'bg-surface-800 text-gray-400 border-surface-700 hover:text-white hover:border-surface-600'
+                              }`}
+                            >Auto top-up{e.autoTopup?.enabled ? ': On' : ''}</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              {/* Canisters this identity can't read */}
+              {inaccessible.length > 0 && (
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                  <button
+                    onClick={() => setShowInaccessible((v) => !v)}
+                    className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-surface-800/50 transition-colors"
+                  >
+                    <span className="text-sm text-gray-400">Not accessible with this identity ({inaccessible.length})</span>
+                    <ChevronIcon className="w-4 h-4 text-gray-500" direction={showInaccessible ? 'down' : 'right'} />
+                  </button>
+                  {showInaccessible && (
+                    <div className="divide-y divide-surface-700/60 border-t border-surface-700">
+                      {inaccessible.map((e) => (
+                        <div key={e.canisterId} className="px-5 py-3 opacity-70">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-gray-300">{e.name}</span>
+                            <span className="text-[11px] text-gray-600">{e.projectName}</span>
+                            <span className="text-[11px] text-gray-600 font-mono">{e.canisterId}</span>
+                          </div>
+                          <p className="text-[11px] text-gray-600 mt-1 truncate" title={e.error}>{e.error}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
     function App() {
       // State
       const [projectPath, setProjectPath] = useState('');
@@ -1548,6 +1788,10 @@
       const [summaryLoading, setSummaryLoading] = useState(false);
       const [buildBeforeDeploy, setBuildBeforeDeploy] = useState(true);
       const [recentProjects, setRecentProjects] = useState([]);
+      const [fleet, setFleet] = useState(null); // GET /api/fleet response
+      const [fleetLoading, setFleetLoading] = useState(false);
+      const [fleetError, setFleetError] = useState('');
+      const [fleetBalances, setFleetBalances] = useState({ icp: null, cycles: null }); // mainnet identity balances for fleet top-ups
 
       // Toast notifications
       const [toasts, setToasts] = useState([]);
@@ -1632,6 +1876,27 @@
           setAutoTopUpGlobal(data.global || {});
         } catch { /* leave existing config in place on failure */ }
       }, [projectPath]);
+
+      // Fetch the production fleet (all mainnet canisters across recent projects)
+      const fetchFleet = useCallback(async () => {
+        setFleetLoading(true);
+        setFleetError('');
+        try {
+          const data = await api.get('/api/fleet?network=ic');
+          setFleet(data);
+        } catch (e) {
+          setFleetError(e.message);
+        }
+        setFleetLoading(false);
+        // Mainnet identity balances for the fleet top-up modal — independent of the selected network
+        api.get('/api/ledger/balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, icp: d.balance || null }))).catch(() => {});
+        api.get('/api/cycles/identity-balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, cycles: d.cycles || null }))).catch(() => {});
+      }, []);
+
+      // Scan the fleet the first time the tab is opened
+      useEffect(() => {
+        if (tab === 'fleet' && !fleet && !fleetLoading) fetchFleet();
+      }, [tab]);
 
       // Fetch ICP ledger balance for current identity
       const fetchIcpBalance = useCallback(async () => {
@@ -1981,11 +2246,17 @@
         });
       }, [canisterAction]);
 
-      // Top up canister with cycles (called from TopUpModal)
+      // Top up canister with cycles (called from TopUpModal). The modal state can
+      // carry a per-canister context ({ path, network, fleet }) so the Fleet tab
+      // tops up against the owning project on ic; without it we fall back to the
+      // currently loaded project and selected network.
       const executeTopUp = useCallback(async (name, amount, source) => {
-        setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: true } }));
+        const ctx = topUpModal || {};
+        const ctxPath = ctx.path || projectPath;
+        const ctxNetwork = ctx.network || network;
+        if (!ctx.fleet) setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: true } }));
         try {
-          const data = await api.post('/api/canister/top-up', { path: projectPath, canister: name, network, amount, source });
+          const data = await api.post('/api/canister/top-up', { path: ctxPath, canister: name, network: ctxNetwork, amount, source });
           if (data.ok) {
             setLogs((prev) => [...prev, { type: 'info', text: `Topped up ${name}: ${data.output}` }]);
             addToast(`Topped up ${name}`, 'success');
@@ -1993,23 +2264,35 @@
             setLogs((prev) => [...prev, { type: 'error', text: `Top-up failed: ${data.output}` }]);
             addToast(`Top-up failed for ${name}`, 'error');
           }
-          await fetchCanisterStatus(name);
-          fetchTopupHistory();
-          fetchCyclesBalance();
-          fetchIcpBalance();
+          if (ctx.fleet) {
+            fetchFleet();
+          } else {
+            await fetchCanisterStatus(name);
+            fetchTopupHistory();
+            fetchCyclesBalance();
+            fetchIcpBalance();
+          }
         } catch (e) {
-          setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
+          if (ctx.fleet) {
+            addToast(`Top-up failed for ${name}: ${e.message}`, 'error');
+          } else {
+            setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
+          }
         }
-      }, [projectPath, network, fetchCanisterStatus, fetchTopupHistory, fetchCyclesBalance, fetchIcpBalance]);
+      }, [topUpModal, projectPath, network, fetchCanisterStatus, fetchTopupHistory, fetchCyclesBalance, fetchIcpBalance, fetchFleet, addToast]);
 
-      // Save per-canister auto top-up config (called from AutoTopUpModal)
+      // Save per-canister auto top-up config (called from AutoTopUpModal). Like
+      // executeTopUp, the modal state can carry a per-canister context from the
+      // Fleet tab ({ path, network, fleet }).
       const saveAutoTopUp = useCallback(async (cfg) => {
         if (!autoTopUpModal) return;
         const name = autoTopUpModal.canisterName;
+        const ctxPath = autoTopUpModal.path || projectPath;
+        const ctxNetwork = autoTopUpModal.network || network;
         try {
           const data = await api.post('/api/autotopup/config', {
-            path: projectPath,
-            network,
+            path: ctxPath,
+            network: ctxNetwork,
             canister: name,
             enabled: cfg.enabled,
             thresholdCycles: cfg.thresholdCycles,
@@ -2023,13 +2306,14 @@
           }
           setLogs((prev) => [...prev, { type: 'info', text: `Auto top-up ${cfg.enabled ? 'enabled' : 'updated'} for ${name}` }]);
           addToast(`Auto top-up saved for ${name}`, 'success');
-          fetchAutoTopUpConfig();
+          if (autoTopUpModal.fleet) fetchFleet();
+          else fetchAutoTopUpConfig();
           setAutoTopUpModal(null);
         } catch (e) {
           setLogs((prev) => [...prev, { type: 'error', text: `Auto top-up config failed: ${e.message}` }]);
           addToast(`Auto top-up config failed for ${name}`, 'error');
         }
-      }, [autoTopUpModal, projectPath, network, addToast, fetchAutoTopUpConfig]);
+      }, [autoTopUpModal, projectPath, network, addToast, fetchAutoTopUpConfig, fetchFleet]);
 
       // Toggle/persist a global auto top-up setting via the shared settings store
       const saveAutoTopUpGlobal = useCallback(async (patch, settingsBody) => {
@@ -2277,7 +2561,7 @@
             {/* Tabs + Network Toggle */}
             <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
               <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700 w-fit">
-                {['deploy', 'canisters', 'snapshots'].map((t) => (
+                {['deploy', 'canisters', 'snapshots', 'fleet'].map((t) => (
                   <button
                     key={t}
                     onClick={() => setTab(t)}
@@ -3264,6 +3548,17 @@
                 addToast={addToast}
               />
             )}
+
+            {tab === 'fleet' && (
+              <FleetTab
+                fleet={fleet}
+                loading={fleetLoading}
+                error={fleetError}
+                onRefresh={fetchFleet}
+                onTopUp={(e) => setTopUpModal({ canisterName: e.name, path: e.project, network: 'ic', fleet: true })}
+                onAutoTopUp={(e) => setAutoTopUpModal({ canisterName: e.name, path: e.project, network: 'ic', fleet: true, current: e.autoTopup || null })}
+              />
+            )}
           </main>
 
           <FolderBrowser
@@ -3311,16 +3606,20 @@
             isOpen={!!topUpModal}
             canisterName={topUpModal?.canisterName || ''}
             onClose={() => setTopUpModal(null)}
-            icpBalance={icpBalance}
-            cyclesBalance={cyclesBalance}
+            icpBalance={topUpModal?.fleet ? fleetBalances.icp : icpBalance}
+            cyclesBalance={topUpModal?.fleet ? fleetBalances.cycles : cyclesBalance}
             onTopUp={executeTopUp}
           />
 
           <AutoTopUpModal
             isOpen={!!autoTopUpModal}
             canisterName={autoTopUpModal?.canisterName || ''}
-            network={network}
-            current={autoTopUpModal ? (autoTopUpConfig[network]?.[autoTopUpModal.canisterName] || null) : null}
+            network={autoTopUpModal?.network || network}
+            current={autoTopUpModal
+              ? (autoTopUpModal.fleet
+                  ? (autoTopUpModal.current || null)
+                  : (autoTopUpConfig[network]?.[autoTopUpModal.canisterName] || null))
+              : null}
             onClose={() => setAutoTopUpModal(null)}
             onSave={saveAutoTopUp}
           />
