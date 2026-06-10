@@ -572,8 +572,17 @@
         return n.toLocaleString();
       };
 
+      // Paying from the cycles balance can be validated client-side; the ICP
+      // path can't (the ICP→cycles rate follows the live XDR rate), so for
+      // that source the CLI stays the authority.
+      const exceedsCycles = source === 'cycles'
+        && cyclesBalance != null
+        && amount !== ''
+        && !isNaN(Number(amount))
+        && Number(amount) > Number(cyclesBalance);
+
       const handleSubmit = () => {
-        if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+        if (!amount || isNaN(Number(amount)) || Number(amount) <= 0 || exceedsCycles) return;
         onTopUp(canisterName, amount, source);
         setAmount('');
         onClose();
@@ -627,11 +636,16 @@
                 {source === 'icp' && (
                   <p className="text-[11px] text-yellow-400/80 mt-1.5">Will burn ICP to mint cycles, then top up the canister</p>
                 )}
+                {exceedsCycles && (
+                  <p className="text-[11px] text-red-400 mt-1.5">
+                    Exceeds your cycles balance ({formatBal(cyclesBalance)} available) — lower the amount or switch to ICP (auto-mint).
+                  </p>
+                )}
               </div>
             </div>
             <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
               <button onClick={() => { onClose(); setAmount(''); }} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Cancel</button>
-              <button onClick={handleSubmit} disabled={!amount || isNaN(Number(amount)) || Number(amount) <= 0} className={`px-4 py-2 text-sm font-medium rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed ${source === 'icp' ? 'bg-icp-500 hover:bg-icp-600' : 'bg-green-600 hover:bg-green-700'}`}>
+              <button onClick={handleSubmit} disabled={!amount || isNaN(Number(amount)) || Number(amount) <= 0 || exceedsCycles} className={`px-4 py-2 text-sm font-medium rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed ${source === 'icp' ? 'bg-icp-500 hover:bg-icp-600' : 'bg-green-600 hover:bg-green-700'}`}>
                 Top Up {amount ? formatBal(amount) : ''} cycles
               </button>
             </div>
@@ -1798,7 +1812,8 @@
       const addToast = useCallback((message, type = 'info') => {
         const id = Date.now() + Math.random();
         setToasts((prev) => [...prev, { id, message, type }]);
-        setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+        // Errors carry a reason the user needs time to read
+        setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 9000 : 4000);
       }, []);
 
       // Collapsible sections
@@ -2262,7 +2277,9 @@
             addToast(`Topped up ${name}`, 'success');
           } else {
             setLogs((prev) => [...prev, { type: 'error', text: `Top-up failed: ${data.output}` }]);
-            addToast(`Top-up failed for ${name}`, 'error');
+            // Include the CLI's reason — on the Fleet tab the log panel isn't visible
+            const reason = String(data.output || '').trim().replace(/^Error:\s*/i, '');
+            addToast(`Top-up failed for ${name}${reason ? `: ${reason.slice(0, 160)}` : ''}`, 'error');
           }
           if (ctx.fleet) {
             fetchFleet();
