@@ -547,23 +547,20 @@ app.get('/api/identity/principal', (_req, res) => {
   res.json({ principal: result.data });
 });
 
-// Read dfx.json or icp.yaml from a project folder
-app.post('/api/project/info', (req, res) => {
-  const { path: projectPath } = req.body;
-  if (!projectPath) return res.status(400).json({ error: 'path required' });
-
+// Parse a project's dfx.json or icp.yaml into { canisters, networks, ... }.
+// Throws if neither config exists or parsing fails — callers map that to HTTP.
+function parseProjectConfig(projectPath) {
   const dfxPath = join(projectPath, 'dfx.json');
   const icpYamlPath = join(projectPath, 'icp.yaml');
   const hasDfxJson = existsSync(dfxPath);
   const hasIcpYaml = existsSync(icpYamlPath);
 
   if (!hasDfxJson && !hasIcpYaml) {
-    return res.status(404).json({ error: 'No icp.yaml or dfx.json found in that folder' });
+    throw new Error('No icp.yaml or dfx.json found in that folder');
   }
 
-  try {
-    // Prefer icp.yaml when both exist (modern ICP CLI format)
-    if (hasIcpYaml) {
+  // Prefer icp.yaml when both exist (modern ICP CLI format)
+  if (hasIcpYaml) {
       // icp.yaml parsing: line-based parser for canisters array and environments
       const yamlContent = readFileSync(icpYamlPath, 'utf-8');
       const canisters = [];
@@ -658,7 +655,7 @@ app.post('/api/project/info', (req, res) => {
       for (const env of environments) {
         networkSet.add(env.name);
       }
-      res.json({ canisters, networks: [...networkSet], environments, raw: yamlContent, configType: 'icp.yaml' });
+      return { canisters, networks: [...networkSet], environments, raw: yamlContent, configType: 'icp.yaml' };
     } else {
       // Legacy dfx.json parsing
       const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
@@ -685,8 +682,21 @@ app.post('/api/project/info', (req, res) => {
       }
       networkSet.add('local');
       const networks = [...networkSet];
-      res.json({ canisters, networks, raw: dfxJson, configType: 'dfx.json' });
+      return { canisters, networks, raw: dfxJson, configType: 'dfx.json' };
     }
+}
+
+// Read dfx.json or icp.yaml from a project folder
+app.post('/api/project/info', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  if (!existsSync(join(projectPath, 'dfx.json')) && !existsSync(join(projectPath, 'icp.yaml'))) {
+    return res.status(404).json({ error: 'No icp.yaml or dfx.json found in that folder' });
+  }
+
+  try {
+    res.json(parseProjectConfig(projectPath));
   } catch (e) {
     res.status(500).json({ error: `Failed to parse project config: ${e.message}` });
   }
@@ -899,6 +909,122 @@ app.post('/api/canisters/status-all', async (req, res) => {
   }
 
   res.json(results);
+});
+
+// ---------- Fleet: identity-wide canister overview ----------
+
+// Mirror of the frontend's isRemoteForNetwork heuristic — canisters that are
+// externally owned / pulled on the given network are not part of the fleet.
+function isRemoteCanister(c, network) {
+  if (c.pullType) return true;
+  if (c.isPrebuilt && network !== 'local') return true;
+  if (c.type === 'unknown' && !c.isPrebuilt) return true;
+  if (c.remote && c.remote.id) {
+    if (c.remote.id[network]) return true;
+    if (network !== 'local' && c.remote.id.ic) return true;
+  }
+  return false;
+}
+
+// Aggregate every deployed canister on a non-local network across all recent
+// projects, with cycles balance, running status, controllers, and auto top-up
+// config. A successful `canister status` on mainnet implies the current
+// identity is a controller; entries that error are returned with the error so
+// the UI can show them as inaccessible rather than silently dropping them.
+app.get('/api/fleet', async (req, res) => {
+  const network = req.query.network || 'ic';
+  try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (network === 'local') return res.status(400).json({ error: 'Fleet view is for non-local networks' });
+
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  // Identity context
+  const identityResult = runCliSync(CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami']);
+  const principalResult = runCliSync(CLI === 'icp' ? ['identity', 'principal'] : ['identity', 'get-principal']);
+  const identity = identityResult.ok ? identityResult.data : null;
+  const principal = principalResult.ok ? principalResult.data : null;
+
+  // Candidate projects = recent projects from settings
+  const settings = readSettings();
+  const recent = Array.isArray(settings.recentProjects) ? settings.recentProjects : [];
+  const projects = [];
+  const skipped = [];
+  for (const p of recent) {
+    if (!p || !p.path) continue;
+    let safe;
+    try { safe = assertSafePath(p.path, 'Project path'); } catch { skipped.push({ path: p.path, reason: 'outside-home' }); continue; }
+    if (!existsSync(join(safe, 'icp.yaml')) && !existsSync(join(safe, 'dfx.json'))) {
+      skipped.push({ path: safe, reason: 'no-config' });
+      continue;
+    }
+    if (!projects.some((pr) => pr.path === safe)) {
+      projects.push({ path: safe, name: p.name || safe.split('/').pop() });
+    }
+  }
+
+  // Collect (project, canister) pairs; pre-read per-project files once.
+  const pairs = [];
+  for (const proj of projects) {
+    let cfg;
+    try {
+      cfg = parseProjectConfig(proj.path);
+    } catch (e) {
+      skipped.push({ path: proj.path, reason: `parse-failed: ${e.message}` });
+      continue;
+    }
+    const ids = readCanisterIds(proj.path);
+    const autoTopup = readAutoTopup(proj.path);
+    for (const c of (cfg.canisters || [])) {
+      try { assertSafeName(c.name, 'canister'); } catch { continue; }
+      if (isRemoteCanister(c, network)) continue;
+      pairs.push({ proj, canister: c, ids, autoTopup });
+    }
+  }
+
+  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup }) => {
+    // Resolve the canister ID from canister_ids.json first; only fall back to
+    // the CLI (an extra spawn) when the file doesn't have it.
+    let canisterId = ids[canister.name]?.[network] || null;
+    if (!canisterId) {
+      const idResult = await getCanisterIdAsync(canister.name, netArgs, proj.path);
+      canisterId = idResult.ok ? idResult.data.trim() : null;
+    }
+    // Not deployed on this network — not part of the fleet.
+    if (!canisterId) return null;
+
+    const entry = {
+      project: proj.path,
+      projectName: proj.name,
+      name: canister.name,
+      type: canister.type || 'unknown',
+      canisterId,
+      autoTopup: autoTopup?.[network]?.[canister.name] || null,
+    };
+
+    const statusResult = await runCliAsync(['canister', 'status', canister.name, ...netArgs], proj.path);
+    if (statusResult.ok) {
+      const parsed = parseCanisterStatus(statusResult.data);
+      delete parsed.raw; // keep the payload light — the UI never shows raw status text here
+      Object.assign(entry, parsed);
+      entry.isController = !!(principal && Array.isArray(parsed.controllers) && parsed.controllers.includes(principal));
+    } else {
+      entry.error = statusResult.data;
+    }
+    return entry;
+  });
+
+  // Dedupe by canister ID — the same canister can appear via multiple projects.
+  const seen = new Set();
+  const canisters = [];
+  for (const e of entries) {
+    if (!e) continue;
+    if (seen.has(e.canisterId)) continue;
+    seen.add(e.canisterId);
+    canisters.push(e);
+  }
+
+  res.json({ network, identity, principal, projectsScanned: projects.length, skipped, canisters });
 });
 
 // ---------- Canister lifecycle operations ----------
