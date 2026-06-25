@@ -8,10 +8,12 @@ ICP Deploy gives you a browser UI that wraps the `icp` CLI for common canister o
 
 - **Deploy** — select canisters, choose upgrade/reinstall/install mode, watch logs stream live
 - **Monitor** — see cycles balance, memory usage, running status, and module hash for every canister
+- **Fleet** — identity-wide view of all production canisters across all recent projects; grouped by project with cycles health bars and top-up controls
+- **Auto top-up** — set a minimum cycles threshold per canister; the dashboard tops up automatically when the balance drops below it
 - **Controllers** — view, add, and remove canister controllers
 - **Snapshots** — create, restore, download, and delete canister snapshots (auto stop/restart handled for you)
 - **Identities** — switch active identity; principal and ICP balance update in the header
-- **Cycles** — top up canister cycles from ICP; see if cycles are stranded on the cycles ledger
+- **Cycles** — top up canister cycles from ICP or your cycles balance; warnings when amount exceeds available balance; CLI failure reason surfaced in the error toast
 - **Multi-project** — quick-switch between recent projects; networks auto-discovered from `icp.yaml`
 
 Everything runs locally — no telemetry, no cloud, no accounts.
@@ -19,8 +21,10 @@ Everything runs locally — no telemetry, no cloud, no accounts.
 ## Requirements
 
 - **Node.js** 18+
-- **`icp` CLI** 0.2.x — [install instructions](https://internetcomputer.org/docs/building-apps/getting-started/install)
+- **`icp` CLI** 1.0.0+ — [install instructions](https://internetcomputer.org/docs/building-apps/getting-started/install)
 - An ICP project with an `icp.yaml` config file
+
+> **Note for icp 1.0.0 users:** if your project uses `@dfinity/asset-canister@v2.1.0`, update it to `@dfinity/asset-canister@v2.2.1`. The `assets` sync step type was removed in icp 1.0.0 and will cause `canister status` to panic for any canister using the old recipe.
 
 ## Installation
 
@@ -41,6 +45,15 @@ Then open [http://localhost:3456](http://localhost:3456).
    - **Deploy** — build and deploy canisters, watch live output
    - **Canisters** — view status, top up cycles, manage controllers
    - **Snapshots** — snapshot and restore canister state
+   - **Fleet** — view all production canisters across every recent project
+
+### Fleet tab
+
+The Fleet tab scans all recent projects against `ic` mainnet and shows every canister linked to the active identity in one view. Summary cards show total cycles, low-balance count, and critical count. Each canister has a Top Up button and an Auto top-up configuration.
+
+### Auto top-up
+
+Click **Auto top-up** on any canister to configure a minimum cycles threshold and a top-up amount. When the canister's balance drops below the threshold, the dashboard tops it up automatically the next time you open the Fleet or Canisters tab.
 
 ### Deploying to mainnet
 
@@ -66,11 +79,11 @@ This tool runs on localhost and is intended for single-user developer machines. 
 ## Architecture
 
 ```
-server.js          Express + WebSocket backend (~1700 lines)
-public/index.html  Single-file React frontend (~2800 lines, CDN React 18)
+server.js          Express + WebSocket backend (~2360 lines)
+public/index.html  Single-file React frontend (~3700 lines, CDN React 18 + Babel 7)
 ```
 
-Settings are persisted to `~/.canister-panel-settings.json`. Deploy history is written to `.deploy-history.json` in each project root.
+Settings are persisted to `~/.canister-panel-settings.json`. Deploy history is written to `.deploy-history.json` in each project root. Auto top-up config is written to `.autotopup.json` in each project root.
 
 ## License
 
