@@ -168,7 +168,7 @@ function runCliSync(args, cwd, _retried = false) {
       cwd,
       encoding: 'utf-8',
       timeout: 30000,
-      env: { ...process.env, HOME: process.env.HOME },
+      env: { ...process.env, HOME: process.env.HOME, PWD: cwd || process.cwd() },
     });
     if (result.error && result.error.code === 'ENOENT' && !_retried) {
       CLI = detectCli();
@@ -192,7 +192,7 @@ function runCliAsync(args, cwd, _retried = false) {
     try {
       child = spawn(CLI, args, {
         cwd,
-        env: { ...process.env, HOME: process.env.HOME },
+        env: { ...process.env, HOME: process.env.HOME, PWD: cwd || process.cwd() },
       });
     } catch (e) {
       resolve({ ok: false, data: e.message });
@@ -1572,7 +1572,7 @@ app.post('/api/canister/snapshot/download', (req, res) => {
     cwd: projectPath,
     encoding: 'utf-8',
     timeout: 300000, // 5 min
-    env: { ...process.env, HOME: process.env.HOME },
+    env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
   });
 
   if (result.status === 0) {
@@ -1598,7 +1598,7 @@ app.post('/api/canister/snapshot/upload', (req, res) => {
     cwd: projectPath,
     encoding: 'utf-8',
     timeout: 300000,
-    env: { ...process.env, HOME: process.env.HOME },
+    env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
   });
 
   if (result.status === 0) {
@@ -1782,7 +1782,7 @@ app.post('/api/build', (req, res) => {
     cwd: projectPath,
     encoding: 'utf-8',
     timeout: 300000, // 5 min
-    env: { ...process.env, HOME: process.env.HOME },
+    env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
   });
 
   if (result.status === 0) {
@@ -1938,6 +1938,7 @@ app.post('/api/replica/start', (req, res) => {
   const child = spawn(CLI, args, {
     cwd: projectPath || process.cwd(),
     stdio: 'pipe',
+    env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
   });
 
   let output = '';
@@ -2084,7 +2085,7 @@ wss.on('connection', (ws, req) => {
           cwd: projectPath,
           encoding: 'utf-8',
           timeout: 300000,
-          env: { ...process.env, HOME: process.env.HOME },
+          env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
         });
 
         if (buildResult.stdout) ws.send(JSON.stringify({ type: 'log', data: buildResult.stdout }));
@@ -2120,7 +2121,7 @@ wss.on('connection', (ws, req) => {
 
       const child = spawn(CLI, args, {
         cwd: projectPath,
-        env: { ...process.env, HOME: process.env.HOME },
+        env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
       });
 
       let deployOutput = '';
@@ -2257,7 +2258,7 @@ wss.on('connection', (ws, req) => {
 
       const child = spawn(CLI, args, {
         cwd: projectPath || process.cwd(),
-        env: { ...process.env, HOME: process.env.HOME },
+        env: { ...process.env, HOME: process.env.HOME, PWD: projectPath || process.cwd() },
       });
 
       let combined = '';

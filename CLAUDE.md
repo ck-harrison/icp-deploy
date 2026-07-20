@@ -14,6 +14,7 @@
 - **icp vs dfx args**: `icp` uses `-e <env>`, `dfx` uses `--network <net>`. Always go through `networkArgs()`.
 - **icp.yaml canister formats**: Both inline (`- name: foo`) and directory-reference (`- path/to/dir` with `canister.yaml` inside) must be handled.
 - **CSRF**: All API calls require `X-Requested-With: CanisterPanel` header.
+- **`PWD` must be set on every CLI spawn**: the `icp` CLI resolves the project manifest from the `PWD` env var, not from the spawn's `cwd`. Passing only `cwd` makes it search the server's own launch directory and fail with "project manifest not found". Every `spawn`/`spawnSync` of the CLI must pass `env: { ...process.env, HOME: process.env.HOME, PWD: cwd || process.cwd() }` — never bare `PWD: cwd`, since helpers like the identity calls are invoked with no cwd.
 - **CDN version pins**: `@babel/standalone` must stay pinned to `@7` (or a specific 7.x semver). Babel 8 changed `sourceType` default to `'module'`, causing the transpiler to emit `import` statements into a non-module `<script>` context — blank screen, no fallback. Same risk applies to any unpinned CDN build tool.
 
 ---
