@@ -106,7 +106,7 @@ These require interacting with the browser at http://localhost:3456.
 
 ### 3. Fleet Tab (PR #6)
 
-- [x] `/api/fleet?network=ic` scans all recent projects and returns canisters
+- [x] `/api/fleet` scans all recent projects and returns canisters (was `?network=ic` at PR #6; now defaults to `?network=all` — see the tier section below)
 - [x] Deduplication by canister ID works (same canister in multiple projects counted once)
 - [x] Canisters grouped by project, preserving recent-project order
 - [x] Cycles balance parsed and health calculated per canister
@@ -120,6 +120,24 @@ These require interacting with the browser at http://localhost:3456.
 - [ ] Auto top-up button opens modal pre-scoped to that canister
 - [ ] Inaccessible canisters section is collapsible
 - [ ] Refresh button triggers re-scan
+
+**Fleet production/staging tiers**
+
+- [x] `/api/fleet` defaults to `network=all` and scans every non-local network each project declares (verified: 29 rows — 25 on `ic`, 3 on Tribez `staging`, cost ≈ one network's worth of calls)
+- [x] `availableNetworks` returned as the union across scanned projects, `ic` always present (verified: `["ic","staging"]`)
+- [x] `?network=<name>` still scans a single network (backward-compatible)
+- [x] Default tier derives from network: `ic` → production, custom environment → staging
+- [x] `POST /api/fleet/tier` moves a canister and persists under `fleetTiers[path][network][canister]`
+- [x] `tier: 'default'` clears the override and prunes emptied branches back to `{}`
+- [x] Rejects an invalid tier, a path outside `$HOME`, and an unsafe canister name; missing `X-Requested-With` → 403
+- [x] Move button round-trips in the browser: 25/3 → 24/4 → 25/3, updating counts in place with no rescan and no console errors
+- [x] Override survives a full page reload (fresh load: `frontend-staging` absent from Production, present in Staging)
+- [x] Reclassified rows show a `moved` chip; every row shows its real network badge
+- [x] Staging column warns when rows are on `ic` (verified: "1 of these is on ic — real mainnet cycles")
+- [x] Newly deployed canisters are picked up without a restart (verified inadvertently: `backend-staging` appeared mid-session and scanned correctly)
+- [ ] Top Up from a staging-tier row spends against that row's real network, and the modal shows that network's identity balances — **not exercised: would spend real cycles**
+- [ ] Auto top-up saved from a staging-tier row writes under that row's network key in `.autotopup.json`
+- [ ] Behaviour when a canister is deleted while an override for it still exists (override becomes inert; not verified)
 
 ---
 

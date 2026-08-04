@@ -1521,9 +1521,16 @@
     }
 
     // ---- Main App ----
-    // ---- Fleet Tab (all production canisters across recent projects) ----
-    function FleetTab({ fleet, loading, error, onRefresh, onTopUp, onAutoTopUp }) {
+    // ---- Fleet Tab (every canister across recent projects, split by tier) ----
+    // The two columns are *classifications*, not networks: a canister deployed
+    // on `ic` can be classified into staging (ICP Appstore's frontend-staging),
+    // and a canister on a `staging` environment is staging by default (Tribez).
+    // The server scans all non-local networks in one pass and tags each row with
+    // its `network` and its `tier`; `onMoveTier` reclassifies a single row.
+    function FleetTab({ fleet, loading, error, tier, onSelectTier, onMoveTier, onRefresh, onTopUp, onAutoTopUp }) {
       const [showInaccessible, setShowInaccessible] = useState(false);
+      const tierLabel = (t) => (t === 'production' ? 'Production' : 'Staging');
+      const otherTier = tier === 'production' ? 'staging' : 'production';
 
       const formatCycles = (c) => {
         if (!c) return '—';
@@ -1550,9 +1557,17 @@
       const healthBarColors = { great: 'bg-green-400', good: 'bg-blue-400', low: 'bg-yellow-400', critical: 'bg-red-400', unknown: 'bg-gray-600' };
       const healthBarWidth = { great: 'w-full', good: 'w-3/4', low: 'w-1/3', critical: 'w-[10%]', unknown: 'w-0' };
 
-      const entries = fleet?.canisters || [];
+      const allEntries = fleet?.canisters || [];
+      const tierCounts = {
+        production: allEntries.filter((e) => e.tier === 'production').length,
+        staging: allEntries.filter((e) => e.tier === 'staging').length,
+      };
+      const entries = allEntries.filter((e) => e.tier === tier);
       const accessible = entries.filter((e) => !e.error);
       const inaccessible = entries.filter((e) => e.error);
+      // Canisters classified as staging but living on mainnet still burn real
+      // cycles — worth saying out loud, since the yellow chip reads as "safe".
+      const mainnetInStaging = tier === 'staging' ? entries.filter((e) => e.network === 'ic').length : 0;
 
       // Summary numbers (BigInt-safe — cycles balances overflow Number territory fast)
       let totalCycles = 0n;
@@ -1579,9 +1594,9 @@
           {/* Header bar */}
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-base font-semibold text-white">Production Canisters</h2>
+              <h2 className="text-base font-semibold text-white">Fleet Canisters</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                All mainnet canisters across your recent projects
+                Every canister across your recent projects, split into production and staging
                 {fleet?.identity ? <span> — identity <span className="text-gray-400 font-mono">{fleet.identity}</span></span> : null}
               </p>
             </div>
@@ -1598,10 +1613,40 @@
             </button>
           </div>
 
-          {/* Network indicator */}
-          <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm bg-orange-500/10 border border-orange-500/20 text-orange-300">
-            <div className="w-2 h-2 rounded-full bg-orange-400" />
-            Production (ic) — scanned {fleet?.projectsScanned ?? 0} recent project(s)
+          {/* Tier switcher — production / staging classification, not network */}
+          <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700 w-fit">
+            {['production', 'staging'].map((t) => {
+              const activeStyle = t === 'production'
+                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/20'
+                : 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white shadow-lg shadow-yellow-500/20';
+              return (
+                <button
+                  key={t}
+                  onClick={() => onSelectTier(t)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                    tier === t ? activeStyle : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {tierLabel(t)}
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${tier === t ? 'bg-black/25' : 'bg-surface-800'}`}>{tierCounts[t]}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Tier indicator */}
+          <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm ${
+            tier === 'production'
+              ? 'bg-orange-500/10 border border-orange-500/20 text-orange-300'
+              : 'bg-yellow-500/10 border border-yellow-500/20 text-yellow-300'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${tier === 'production' ? 'bg-orange-400' : 'bg-yellow-400'}`} />
+            {tierLabel(tier)} — scanned {fleet?.projectsScanned ?? 0} recent project(s)
+            {mainnetInStaging > 0 && (
+              <span className="text-yellow-200/70">
+                · {mainnetInStaging} of these {mainnetInStaging === 1 ? 'is' : 'are'} on <span className="font-mono">ic</span> — real mainnet cycles
+              </span>
+            )}
           </div>
 
           {error && (
@@ -1616,8 +1661,12 @@
             </div>
           ) : !error && entries.length === 0 && fleet ? (
             <div className="px-5 py-10 text-center bg-surface-900 border border-surface-700 rounded-2xl">
-              <p className="text-sm text-gray-400">No production canisters found.</p>
-              <p className="text-xs text-gray-600 mt-1.5">Canisters are discovered from your recent projects — load each project once on the Deploy tab and it will be scanned here.</p>
+              <p className="text-sm text-gray-400">Nothing classified as {tierLabel(tier).toLowerCase()}.</p>
+              <p className="text-xs text-gray-600 mt-1.5">
+                {tier === 'staging'
+                  ? <>Canisters on a non-`ic` environment land here automatically. To classify one that lives on <span className="font-mono">ic</span> — a canister named <span className="font-mono">*-staging</span>, say — open Production and use its <span className="text-gray-400">→ Staging</span> button.</>
+                  : <>Canisters are discovered from your recent projects — load each project once on the Deploy tab and it will be scanned here.</>}
+              </p>
             </div>
           ) : entries.length > 0 && (
             <React.Fragment>
@@ -1671,6 +1720,21 @@
                                 e.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
                                 'bg-gray-500/20 text-gray-300'
                               }`}>{e.type}</span>
+                              {/* Network is shown on every row: on the staging
+                                  tab it's the difference between a test replica
+                                  and a real mainnet canister. */}
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${
+                                  e.network === 'ic' ? 'bg-orange-500/20 text-orange-300' : 'bg-yellow-500/20 text-yellow-300'
+                                }`}
+                                title={`Deployed on the "${e.network}" network`}
+                              >{e.network}</span>
+                              {e.tier !== e.tierDefault && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-icp-500/20 text-icp-300"
+                                  title={`Moved here manually — by network it would default to ${e.tierDefault}`}
+                                >moved</span>
+                              )}
                               {e.autoTopup?.enabled && (
                                 <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-green-500/20 text-green-300" title="Auto top-up enabled">Auto</span>
                               )}
@@ -1721,6 +1785,11 @@
                                   : 'bg-surface-800 text-gray-400 border-surface-700 hover:text-white hover:border-surface-600'
                               }`}
                             >Auto top-up{e.autoTopup?.enabled ? ': On' : ''}</button>
+                            <button
+                              onClick={() => onMoveTier(e, otherTier)}
+                              className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:text-white hover:border-icp-500/50 transition-colors"
+                              title={`Classify ${e.name} as ${otherTier} on the Fleet page. Does not move, redeploy, or change the canister itself.`}
+                            >&rarr; {tierLabel(otherTier)}</button>
                           </div>
                         </div>
                       );
@@ -1742,13 +1811,24 @@
                   {showInaccessible && (
                     <div className="divide-y divide-surface-700/60 border-t border-surface-700">
                       {inaccessible.map((e) => (
-                        <div key={e.canisterId} className="px-5 py-3 opacity-70">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-gray-300">{e.name}</span>
-                            <span className="text-[11px] text-gray-600">{e.projectName}</span>
-                            <span className="text-[11px] text-gray-600 font-mono">{e.canisterId}</span>
+                        <div key={e.canisterId} className="px-5 py-3 opacity-70 flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium text-gray-300">{e.name}</span>
+                              <span className="text-[11px] text-gray-600">{e.projectName}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-surface-800 text-gray-500">{e.network}</span>
+                              {e.tier !== e.tierDefault && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-icp-500/20 text-icp-300" title={`Moved here manually — by network it would default to ${e.tierDefault}`}>moved</span>
+                              )}
+                              <span className="text-[11px] text-gray-600 font-mono truncate">{e.canisterId}</span>
+                            </div>
+                            <p className="text-[11px] text-gray-600 mt-1 truncate" title={e.error}>{e.error}</p>
                           </div>
-                          <p className="text-[11px] text-gray-600 mt-1 truncate" title={e.error}>{e.error}</p>
+                          <button
+                            onClick={() => onMoveTier(e, otherTier)}
+                            className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:text-white hover:border-icp-500/50 transition-colors shrink-0"
+                            title={`Classify ${e.name} as ${otherTier} on the Fleet page. Does not move, redeploy, or change the canister itself.`}
+                          >&rarr; {tierLabel(otherTier)}</button>
                         </div>
                       ))}
                     </div>
@@ -1805,7 +1885,8 @@
       const [fleet, setFleet] = useState(null); // GET /api/fleet response
       const [fleetLoading, setFleetLoading] = useState(false);
       const [fleetError, setFleetError] = useState('');
-      const [fleetBalances, setFleetBalances] = useState({ icp: null, cycles: null }); // mainnet identity balances for fleet top-ups
+      const [fleetTier, setFleetTier] = useState('production'); // which Fleet column is shown: 'production' | 'staging'
+      const [fleetBalances, setFleetBalances] = useState({ icp: null, cycles: null }); // identity balances on the network of the canister being topped up
 
       // Toast notifications
       const [toasts, setToasts] = useState([]);
@@ -1892,20 +1973,50 @@
         } catch { /* leave existing config in place on failure */ }
       }, [projectPath]);
 
-      // Fetch the production fleet (all mainnet canisters across recent projects)
+      // Scan every recent project across every non-local network in one pass.
+      // Both Fleet columns come from this single response — the split is by
+      // `tier`, so switching columns is a filter, not a rescan.
       const fetchFleet = useCallback(async () => {
         setFleetLoading(true);
         setFleetError('');
         try {
-          const data = await api.get('/api/fleet?network=ic');
-          setFleet(data);
+          setFleet(await api.get('/api/fleet'));
         } catch (e) {
           setFleetError(e.message);
         }
         setFleetLoading(false);
-        // Mainnet identity balances for the fleet top-up modal — independent of the selected network
+        // Prefetch mainnet identity balances — the common case for a top-up.
+        // Opening the modal refetches for that canister's actual network.
         api.get('/api/ledger/balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, icp: d.balance || null }))).catch(() => {});
         api.get('/api/cycles/identity-balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, cycles: d.cycles || null }))).catch(() => {});
+      }, []);
+
+      // Reclassify one canister between the Fleet page's columns. Updates the
+      // row in place rather than rescanning — a rescan is ~28 CLI calls, and the
+      // only thing that changed is a label in the panel's own settings.
+      const moveFleetTier = useCallback(async (entry, tier) => {
+        try {
+          const data = await api.post('/api/fleet/tier', {
+            path: entry.project, canister: entry.name, network: entry.network, tier,
+          });
+          if (data.error) { addToast(`Move failed: ${data.error}`, 'error'); return; }
+          setFleet((prev) => prev ? {
+            ...prev,
+            canisters: prev.canisters.map((c) => c.canisterId === entry.canisterId ? { ...c, tier: data.tier } : c),
+          } : prev);
+          addToast(`${entry.name} → ${data.tier}`, 'success');
+        } catch (e) {
+          addToast(`Move failed: ${e.message}`, 'error');
+        }
+      }, [addToast]);
+
+      // Open the Fleet top-up modal, refreshing balances for that canister's
+      // network — a staging canister on a testnet has different balances.
+      const openFleetTopUp = useCallback((entry) => {
+        setTopUpModal({ canisterName: entry.name, path: entry.project, network: entry.network, fleet: true });
+        const q = `?network=${encodeURIComponent(entry.network)}`;
+        api.get(`/api/ledger/balance${q}`).then((d) => setFleetBalances((prev) => ({ ...prev, icp: d.balance || null }))).catch(() => {});
+        api.get(`/api/cycles/identity-balance${q}`).then((d) => setFleetBalances((prev) => ({ ...prev, cycles: d.cycles || null }))).catch(() => {});
       }, []);
 
       // Scan the fleet the first time the tab is opened
@@ -3571,9 +3682,12 @@
                 fleet={fleet}
                 loading={fleetLoading}
                 error={fleetError}
-                onRefresh={fetchFleet}
-                onTopUp={(e) => setTopUpModal({ canisterName: e.name, path: e.project, network: 'ic', fleet: true })}
-                onAutoTopUp={(e) => setAutoTopUpModal({ canisterName: e.name, path: e.project, network: 'ic', fleet: true, current: e.autoTopup || null })}
+                tier={fleetTier}
+                onSelectTier={setFleetTier}
+                onMoveTier={moveFleetTier}
+                onRefresh={() => fetchFleet()}
+                onTopUp={openFleetTopUp}
+                onAutoTopUp={(e) => setAutoTopUpModal({ canisterName: e.name, path: e.project, network: e.network, fleet: true, current: e.autoTopup || null })}
               />
             )}
           </main>

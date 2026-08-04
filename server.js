@@ -926,18 +926,36 @@ function isRemoteCanister(c, network) {
   return false;
 }
 
-// Aggregate every deployed canister on a non-local network across all recent
-// projects, with cycles balance, running status, controllers, and auto top-up
-// config. A successful `canister status` on mainnet implies the current
-// identity is a controller; entries that error are returned with the error so
-// the UI can show them as inaccessible rather than silently dropping them.
-app.get('/api/fleet', async (req, res) => {
-  const network = req.query.network || 'ic';
-  try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
-  if (network === 'local') return res.status(400).json({ error: 'Fleet view is for non-local networks' });
+// Which column of the Fleet page a canister belongs to. The default comes from
+// the network it is deployed on ('ic' => production, any custom environment =>
+// staging), because that is right for projects where staging is an environment
+// (Tribez). It is wrong for projects where staging is a canister inside the ic
+// environment (ICP Appstore's frontend-staging), so it is overridable per
+// canister. Overrides live in the panel's own settings — classification is a
+// dashboard view concern, and other projects' configs are not ours to write.
+function defaultFleetTier(network) {
+  return network === 'ic' ? 'production' : 'staging';
+}
 
-  let netArgs;
-  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
+function fleetTierFor(settings, projectPath, network, canisterName) {
+  const o = settings.fleetTiers?.[projectPath]?.[network]?.[canisterName];
+  return o === 'production' || o === 'staging' ? o : defaultFleetTier(network);
+}
+
+// Aggregate every deployed canister across all recent projects, with cycles
+// balance, running status, controllers, auto top-up config, and Fleet tier.
+// `?network=all` (the default) walks every non-local network each project
+// declares; a specific name scans only that network. A successful
+// `canister status` on mainnet implies the current identity is a controller;
+// entries that error are returned with the error so the UI can show them as
+// inaccessible rather than silently dropping them.
+app.get('/api/fleet', async (req, res) => {
+  const requested = req.query.network || 'all';
+  if (requested !== 'all') {
+    try { assertSafeName(requested, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    if (requested === 'local') return res.status(400).json({ error: 'Fleet view is for non-local networks' });
+    try { networkArgs(requested); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
 
   // Identity context
   const identityResult = runCliSync(CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami']);
@@ -963,8 +981,12 @@ app.get('/api/fleet', async (req, res) => {
     }
   }
 
-  // Collect (project, canister) pairs; pre-read per-project files once.
-  const pairs = [];
+  // Parse every project once, collecting the non-local network union as we go.
+  // Sources: icp.yaml environments / dfx.json networks (via parseProjectConfig)
+  // plus the network keys already recorded in canister_ids.json — the latter
+  // catches an environment a project deployed to but no longer declares.
+  const parsed = [];
+  const networkSet = new Set(['ic']);
   for (const proj of projects) {
     let cfg;
     try {
@@ -974,15 +996,39 @@ app.get('/api/fleet', async (req, res) => {
       continue;
     }
     const ids = readCanisterIds(proj.path);
-    const autoTopup = readAutoTopup(proj.path);
-    for (const c of (cfg.canisters || [])) {
-      try { assertSafeName(c.name, 'canister'); } catch { continue; }
-      if (isRemoteCanister(c, network)) continue;
-      pairs.push({ proj, canister: c, ids, autoTopup });
+    const nets = new Set(['ic']);
+    const addNet = (n) => {
+      if (!n || n === 'local') return;
+      try { assertSafeName(n, 'network'); } catch { return; }
+      nets.add(n);
+      networkSet.add(n);
+    };
+    for (const n of (cfg.networks || [])) addNet(n);
+    for (const rec of Object.values(ids)) {
+      if (rec && typeof rec === 'object') for (const n of Object.keys(rec)) addNet(n);
+    }
+    parsed.push({ proj, cfg, nets, ids, autoTopup: readAutoTopup(proj.path) });
+  }
+
+  // (project, canister, network) triples. Scanning every network at once is
+  // what makes the production/staging split possible: a canister deployed on
+  // 'ic' can be classified into staging, so the staging column needs ic rows.
+  // It is also cheap — most canisters exist on only one network, so the total
+  // status-call count is close to a single-network scan, not a multiple of it.
+  const pairs = [];
+  for (const { proj, cfg, nets, ids, autoTopup } of parsed) {
+    const targets = requested === 'all' ? [...nets] : (nets.has(requested) ? [requested] : []);
+    for (const net of targets) {
+      for (const c of (cfg.canisters || [])) {
+        try { assertSafeName(c.name, 'canister'); } catch { continue; }
+        if (isRemoteCanister(c, net)) continue;
+        pairs.push({ proj, canister: c, ids, autoTopup, network: net });
+      }
     }
   }
 
-  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup }) => {
+  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup, network }) => {
+    const netArgs = networkArgs(network);
     // Resolve the canister ID from canister_ids.json first; only fall back to
     // the CLI (an extra spawn) when the file doesn't have it.
     let canisterId = ids[canister.name]?.[network] || null;
@@ -999,6 +1045,9 @@ app.get('/api/fleet', async (req, res) => {
       name: canister.name,
       type: canister.type || 'unknown',
       canisterId,
+      network,
+      tier: fleetTierFor(settings, proj.path, network, canister.name),
+      tierDefault: defaultFleetTier(network),
       autoTopup: autoTopup?.[network]?.[canister.name] || null,
     };
 
@@ -1024,7 +1073,40 @@ app.get('/api/fleet', async (req, res) => {
     canisters.push(e);
   }
 
-  res.json({ network, identity, principal, projectsScanned: projects.length, skipped, canisters });
+  res.json({ network: requested, availableNetworks: [...networkSet], identity, principal, projectsScanned: projects.length, skipped, canisters });
+});
+
+// Move a canister between the Fleet page's production and staging columns.
+// Only non-default classifications are persisted, so changing the default rule
+// later doesn't strand stale overrides; `tier: 'default'` clears one.
+app.post('/api/fleet/tier', (req, res) => {
+  const { path: projectPath, canister, network, tier } = req.body;
+  let safePath;
+  try {
+    safePath = assertSafePath(projectPath, 'Project path');
+    assertSafeName(canister, 'canister');
+    assertSafeName(network, 'network');
+  } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!['production', 'staging', 'default'].includes(tier)) {
+    return res.status(400).json({ error: 'tier must be "production", "staging", or "default"' });
+  }
+
+  const settings = readSettings();
+  if (!settings.fleetTiers || typeof settings.fleetTiers !== 'object') settings.fleetTiers = {};
+  const byProject = settings.fleetTiers[safePath] || (settings.fleetTiers[safePath] = {});
+  const byNetwork = byProject[network] || (byProject[network] = {});
+
+  const fallback = defaultFleetTier(network);
+  const resolved = tier === 'default' ? fallback : tier;
+  if (resolved === fallback) delete byNetwork[canister];
+  else byNetwork[canister] = resolved;
+
+  // Prune emptied branches so the settings file doesn't accrete dead keys
+  if (Object.keys(byNetwork).length === 0) delete byProject[network];
+  if (Object.keys(byProject).length === 0) delete settings.fleetTiers[safePath];
+
+  writeSettings(settings);
+  res.json({ ok: true, tier: resolved, isDefault: resolved === fallback });
 });
 
 // ---------- Canister lifecycle operations ----------

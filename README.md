@@ -8,7 +8,7 @@ ICP Deploy gives you a browser UI that wraps the `icp` CLI for common canister o
 
 - **Deploy** — select canisters, choose upgrade/reinstall/install mode, watch logs stream live
 - **Monitor** — see cycles balance, memory usage, running status, and module hash for every canister
-- **Fleet** — identity-wide view of all production canisters across all recent projects; grouped by project with cycles health bars and top-up controls
+- **Fleet** — identity-wide view of every canister across all recent projects, split into Production and Staging columns you can move canisters between; grouped by project with cycles health bars and top-up controls
 - **Auto top-up** — set a minimum cycles threshold per canister; the dashboard tops up automatically when the balance drops below it
 - **Controllers** — view, add, and remove canister controllers
 - **Snapshots** — create, restore, download, and delete canister snapshots (auto stop/restart handled for you)
@@ -45,11 +45,17 @@ Then open [http://localhost:3456](http://localhost:3456).
    - **Deploy** — build and deploy canisters, watch live output
    - **Canisters** — view status, top up cycles, manage controllers
    - **Snapshots** — snapshot and restore canister state
-   - **Fleet** — view all production canisters across every recent project
+   - **Fleet** — view all canisters across every recent project, split into Production and Staging
 
 ### Fleet tab
 
-The Fleet tab scans all recent projects against `ic` mainnet and shows every canister linked to the active identity in one view. Summary cards show total cycles, low-balance count, and critical count. Each canister has a Top Up button and an Auto top-up configuration.
+The Fleet tab scans every recent project across every non-local network in one pass, and splits the result into two columns: **Production** and **Staging**. Summary cards show total cycles, low-balance count, and critical count for the column you're looking at. Each canister has a Top Up button and an Auto top-up configuration.
+
+**Which column a canister starts in** is derived from the network it's deployed on: `ic` → Production, any custom environment (`staging`, `preview`, …) → Staging.
+
+**Moving canisters between columns.** That default is right when staging is a whole *environment*, and wrong when staging is a *canister* inside the `ic` environment — a canister named `frontend-staging`, say. So every row has a **→ Staging** / **→ Production** button. Clicking it reclassifies that one canister and persists the choice; a reclassified row shows a `moved` chip. The button only changes how the dashboard groups the canister — it does not move, redeploy, or alter the canister itself. Overrides are stored in the dashboard's own settings file, never written into your project's `icp.yaml` or `dfx.json`.
+
+**Staging does not mean safe.** Every row shows a badge for the network it actually lives on. A canister can be classified as Staging and still be on `ic`, burning real mainnet cycles — the Staging column says so explicitly when that's the case. Top Up and Auto top-up always act on the canister's real network, and the identity balances in the top-up modal are read from that same network.
 
 ### Auto top-up
 
