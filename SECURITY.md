@@ -15,7 +15,18 @@ Full security assessment performed using DFINITY security skills methodology. No
 
 ### Fixes Applied
 
-_None yet — fixes will be logged below as they are implemented._
+**2026-08-06 — Finding #4 (low): unvalidated network name reaching an argv slot.**
+`/api/cycles/ledger-balance(s)`, `/api/ledger/balance`, `/api/cycles/identity-balance`
+and the auto-top-up balance helpers each built network args inline, so a value
+like `--help` or `--version` was passed straight to the CLI as a flag. All of
+them now route through a single `ledgerNetworkArgs()` helper (`server.js:161`)
+that calls `assertSafeName` before the value can become an argument.
+
+Verified: `network=--help` and `network=--version` are now rejected with
+`Invalid network: must start with alphanumeric...` on every one of those routes.
+
+Fixed incidentally while correcting a separate `-n`/`-e` flag bug — the same
+inline construction was also passing environment names to the network flag.
 
 ---
 
@@ -33,7 +44,7 @@ _None yet — fixes will be logged below as they are implemented._
 
 | # | Finding | Location | Status |
 |---|---------|----------|--------|
-| 4 | `/api/cycles/ledger-balances` constructs network args inline without calling `assertSafeName`. Values like `--help` would be interpreted as CLI flags. | `server.js:1982` (inline `netArgs` in `/api/cycles/ledger-balances`, bypassing `networkArgs()`) | Open |
+| 4 | ~~`/api/cycles/ledger-balances` constructs network args inline without calling `assertSafeName`. Values like `--help` would be interpreted as CLI flags.~~ | now `ledgerNetworkArgs()` at `server.js:161` | **Fixed 2026-08-06** — see Fixes Applied |
 | 5 | `assertSafePath` uses `path.resolve()` which doesn't resolve symlinks. A symlink inside `$HOME` pointing outside it bypasses the home-directory check. | `server.js:105` (`function assertSafePath`) | Open |
 | 6 | `/api/build`, `/api/canister/update-settings`, `/api/identity/new`, `/api/identity/import` lack rate limiting. | `server.js` (multiple) | Open |
 | 7 | `Number()` conversion of cycles `BigInt` values loses precision above 2^53 (~9,000T cycles). | `public/index.html:387, 568, 1540, 1549, 2571, 3381, 3390` (`formatCycles` / `getCyclesHealth` helpers and the header balance chip) | Open |

@@ -1948,11 +1948,15 @@
       // Fetch cycles balance for current identity
       const fetchCyclesBalance = useCallback(async () => {
         try {
-          const params = network && network !== 'local' ? `?network=${network}` : '';
+          // Send `path` so a custom environment name resolves against the
+          // loaded project's icp.yaml (see /api/cycles/identity-balance).
+          const params = network && network !== 'local'
+            ? `?network=${encodeURIComponent(network)}${projectPath ? `&path=${encodeURIComponent(projectPath)}` : ''}`
+            : '';
           const data = await api.get(`/api/cycles/identity-balance${params}`);
           setCyclesBalance(data.cycles || null);
         } catch { setCyclesBalance(null); }
-      }, [network]);
+      }, [network, projectPath]);
 
       // Fetch top-up history for current project
       const fetchTopupHistory = useCallback(async () => {
@@ -2014,7 +2018,10 @@
       // network — a staging canister on a testnet has different balances.
       const openFleetTopUp = useCallback((entry) => {
         setTopUpModal({ canisterName: entry.name, path: entry.project, network: entry.network, fleet: true });
-        const q = `?network=${encodeURIComponent(entry.network)}`;
+        // `path` lets the server resolve a custom environment name (e.g.
+        // 'staging') against that project's icp.yaml — without it the CLI
+        // rejects the environment as an unknown network.
+        const q = `?network=${encodeURIComponent(entry.network)}&path=${encodeURIComponent(entry.project)}`;
         api.get(`/api/ledger/balance${q}`).then((d) => setFleetBalances((prev) => ({ ...prev, icp: d.balance || null }))).catch(() => {});
         api.get(`/api/cycles/identity-balance${q}`).then((d) => setFleetBalances((prev) => ({ ...prev, cycles: d.cycles || null }))).catch(() => {});
       }, []);
@@ -2027,11 +2034,13 @@
       // Fetch ICP ledger balance for current identity
       const fetchIcpBalance = useCallback(async () => {
         try {
-          const params = network && network !== 'local' ? `?network=${network}` : '';
+          const params = network && network !== 'local'
+            ? `?network=${encodeURIComponent(network)}${projectPath ? `&path=${encodeURIComponent(projectPath)}` : ''}`
+            : '';
           const data = await api.get(`/api/ledger/balance${params}`);
           setIcpBalance(data.balance || null);
         } catch { setIcpBalance(null); }
-      }, [network]);
+      }, [network, projectPath]);
 
       // Load identities + CLI info + settings on mount
       useEffect(() => {
@@ -2315,7 +2324,7 @@
             const ids = Object.values(data).map(s => s.canisterId).filter(Boolean);
             if (ids.length > 0) {
               try {
-                const ledgerData = await api.post('/api/cycles/ledger-balances', { canisterIds: ids, network });
+                const ledgerData = await api.post('/api/cycles/ledger-balances', { canisterIds: ids, network, path: projectPath });
                 setCyclesLedgerBalances(ledgerData);
               } catch { /* non-critical */ }
             }

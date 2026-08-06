@@ -141,6 +141,32 @@ function networkArgs(network) {
   return ['--network', network];
 }
 
+// Network args for identity- and ledger-scoped commands: `cycles mint`,
+// `cycles balance`, `token balance`, cycles-ledger calls. These differ from
+// networkArgs() in their fallback — with no network (or 'local') they still
+// target mainnet, because there is no local cycles ledger or ICP ledger to
+// read.
+//
+// The `-n` vs `-e` distinction is load-bearing. `icp` treats them as
+// conflicting flags: `-n` takes a *network* name, `-e` takes an *environment*
+// name. A project's environment declares which network it targets
+// (Tribez/capsl: `- name: staging` with `network: ic`), so passing an
+// environment name to `-n` fails with "project does not contain a network
+// named 'staging'". Resolving an environment requires the project's icp.yaml,
+// so every caller passing a custom environment must also run the command with
+// that project as cwd.
+//
+// 'ic' is passed as a network name so these commands still work with no
+// project directory at all.
+function ledgerNetworkArgs(network) {
+  // Validate before the value can reach an argv slot — an unchecked name like
+  // '--help' would be read as a flag rather than a network.
+  if (network && network !== 'local') assertSafeName(network, 'network');
+  if (CLI !== 'icp') return network && network !== 'local' ? ['--network', network] : [];
+  if (!network || network === 'local' || network === 'ic') return ['-n', 'ic'];
+  return ['-e', network];
+}
+
 // ---------- helpers ----------
 
 // Get canister ID — dfx uses 'canister id', icp CLI uses 'canister status --id-only'
@@ -1180,14 +1206,14 @@ async function performTopUp({ projectPath, canister, network, amount, source }) 
   // If funding from ICP, mint the cycles first.
   if (needsMint) {
     // Mint targets the requested network; minting is a mainnet operation, so when
-    // the network is local/unset we still default to 'ic'.
-    const mintNetArgs = network && network !== 'local'
-      ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-      : (CLI === 'icp' ? ['-n', 'ic'] : []);
+    // the network is local/unset we still default to 'ic'. Run it from the
+    // project directory so a custom environment name resolves against that
+    // project's icp.yaml — see ledgerNetworkArgs().
+    const mintNetArgs = ledgerNetworkArgs(network);
     const mintCmd = CLI === 'icp'
       ? ['cycles', 'mint', '--cycles', String(amount), ...mintNetArgs]
       : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
-    const mintResult = await runCliAsync(mintCmd);
+    const mintResult = await runCliAsync(mintCmd, projectPath);
     if (!mintResult.ok) {
       if (projectPath) {
         recordTopup(projectPath, { canister, network, amount, success: false, output: `Mint failed: ${mintResult.data}`, source });
@@ -1240,12 +1266,10 @@ async function getCanisterCyclesAsync(canister, netArgs, cwd) {
 
 // Cycles balance of the controlling identity (same command + regex as
 // GET /api/cycles/identity-balance). Returns BigInt or null.
-async function getControllerCyclesBalance(network) {
-  const netArgs = network && network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+async function getControllerCyclesBalance(network, projectPath) {
+  const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
-  const result = await runCliAsync(cmd);
+  const result = await runCliAsync(cmd, projectPath);
   if (!result.ok) return null;
   const match = result.data.match(/([\d_,]+)\s*cycles/i);
   if (!match) return null;
@@ -1254,12 +1278,10 @@ async function getControllerCyclesBalance(network) {
 
 // ICP ledger balance of the controlling identity (same command + regex as
 // GET /api/ledger/balance). Returns Number or null.
-async function getControllerIcpBalance(network) {
-  const netArgs = network && network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+async function getControllerIcpBalance(network, projectPath) {
+  const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
-  const result = await runCliAsync(cmd);
+  const result = await runCliAsync(cmd, projectPath);
   if (!result.ok) return null;
   const match = result.data.match(/([\d.]+)\s*ICP/i);
   if (!match) return null;
@@ -1379,7 +1401,7 @@ async function runAutoTopupPass() {
             if (amount <= 0n) { rec('skipped', 'cap-exhausted'); continue; }
 
             // Available cycles from the controller, honouring the reserve floor
-            const cyclesBal = await getControllerCyclesBalance(network);
+            const cyclesBal = await getControllerCyclesBalance(network, projectPath);
             const availCycles = cyclesBal == null
               ? 0n
               : (cyclesBal > reserveCycles ? cyclesBal - reserveCycles : 0n);
@@ -1392,7 +1414,7 @@ async function runAutoTopupPass() {
               spentNow = amount;
             } else {
               // Cycles short — fall back to minting from ICP for the shortfall
-              const icpBal = await getControllerIcpBalance(network);
+              const icpBal = await getControllerIcpBalance(network, projectPath);
               if (icpBal != null && icpBal > reserveIcp) {
                 if (availCycles > 0n) {
                   await performTopUp({ projectPath, canister, network, amount: availCycles, source: 'auto-cycles' });
@@ -1878,11 +1900,15 @@ app.post('/api/build', (req, res) => {
 app.get('/api/ledger/balance', (req, res) => {
   const network = req.query.network;
   if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
-  const netArgs = network && network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  // Optional `path`: required only to resolve a custom environment name, which
+  // lives in that project's icp.yaml. Omit it for 'ic'/local.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertSafePath(req.query.path, 'Project path'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
-  const result = runCliSync(cmd);
+  const result = runCliSync(cmd, projectPath);
   if (!result.ok) return res.status(500).json({ error: result.data });
   // Output format: "Balance: 12.34567890 ICP" or just a number
   const match = result.data.match(/([\d.]+)\s*ICP/i);
@@ -1894,11 +1920,14 @@ app.get('/api/ledger/balance', (req, res) => {
 app.get('/api/cycles/identity-balance', (req, res) => {
   const network = req.query.network;
   if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
-  const netArgs = network && network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : (CLI === 'icp' ? ['-n', 'ic'] : []);
+  // Optional `path` — see /api/ledger/balance.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertSafePath(req.query.path, 'Project path'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
-  const result = runCliSync(cmd);
+  const result = runCliSync(cmd, projectPath);
   if (!result.ok) return res.status(500).json({ error: result.data });
   // icp CLI: "Balance: 314_540_000_000 cycles"
   const match = result.data.match(/([\d_,]+)\s*cycles/i);
@@ -1949,19 +1978,21 @@ app.post('/api/cycles/balance', (req, res) => {
 // Queries the cycles ledger (um5iw-rqaaa-aaaaq-qaaba-cai) ICRC-1 balance_of
 const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
 app.post('/api/cycles/ledger-balance', (req, res) => {
-  const { canisterId, network } = req.body;
+  const { canisterId, network, path: reqPath } = req.body;
   if (!canisterId || !/^[a-z0-9\-]+$/.test(canisterId)) {
     return res.status(400).json({ error: 'Invalid canister ID' });
   }
   // Only meaningful on mainnet — local replica won't have the cycles ledger
-  const netArgs = network && network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : [];
   if (!network || network === 'local') {
     return res.json({ canisterId, balance: '0' });
   }
+  let netArgs, projectPath;
+  try {
+    netArgs = ledgerNetworkArgs(network);
+    if (reqPath) projectPath = assertSafePath(reqPath, 'Project path');
+  } catch (e) { return res.status(400).json({ error: e.message }); }
   const candid = `(record { owner = principal "${canisterId}"; subaccount = null })`;
-  const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs]);
+  const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
   if (!result.ok) return res.json({ canisterId, balance: '0', error: result.data });
   // Output: "(2_850_000_000_000 : nat)"
   const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
@@ -1971,21 +2002,23 @@ app.post('/api/cycles/ledger-balance', (req, res) => {
 
 // Batch check cycles ledger balances for multiple canisters
 app.post('/api/cycles/ledger-balances', (req, res) => {
-  const { canisterIds, network } = req.body;
+  const { canisterIds, network, path: reqPath } = req.body;
   if (!canisterIds || !Array.isArray(canisterIds)) {
     return res.status(400).json({ error: 'canisterIds array required' });
   }
   if (!network || network === 'local') {
     return res.json(Object.fromEntries(canisterIds.map(id => [id, '0'])));
   }
-  const netArgs = network !== 'local'
-    ? (CLI === 'icp' ? ['-n', network] : ['--network', network])
-    : [];
+  let netArgs, projectPath;
+  try {
+    netArgs = ledgerNetworkArgs(network);
+    if (reqPath) projectPath = assertSafePath(reqPath, 'Project path');
+  } catch (e) { return res.status(400).json({ error: e.message }); }
   const results = {};
   for (const cid of canisterIds) {
     if (!/^[a-z0-9\-]+$/.test(cid)) { results[cid] = '0'; continue; }
     const candid = `(record { owner = principal "${cid}"; subaccount = null })`;
-    const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs]);
+    const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
     if (result.ok) {
       const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
       results[cid] = match ? match[1].replace(/_/g, '') : '0';

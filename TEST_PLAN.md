@@ -135,7 +135,21 @@ These require interacting with the browser at http://localhost:3456.
 - [x] Reclassified rows show a `moved` chip; every row shows its real network badge
 - [x] Staging column warns when rows are on `ic` (verified: "1 of these is on ic — real mainnet cycles")
 - [x] Newly deployed canisters are picked up without a restart (verified inadvertently: `backend-staging` appeared mid-session and scanned correctly)
-- [ ] Top Up from a staging-tier row spends against that row's real network, and the modal shows that network's identity balances — **not exercised: would spend real cycles**
+- [x] Top-up modal on a staging row populates both identity balances (verified: `33.6088 ICP` / `7.74B cycles`; previously blank because the balance calls failed and were swallowed by `.catch(() => {})`)
+- [x] Balance calls from a staging row send `path` so the environment resolves (verified in Chrome: `?network=staging&path=/Users/.../Tribez`)
+- [ ] Top Up from a staging-tier row actually transfers cycles — **not exercised: would spend real ICP/cycles**
+
+**`-n` vs `-e` flag bug (reported 2026-08-06: "Mint failed: project does not contain a network named 'staging'")**
+
+- [x] Reproduced at the CLI: `icp cycles balance -n staging` → `Error: project does not contain a network named 'staging'`; `-e staging` from the project dir → `Balance: 7_740_498_799 cycles`
+- [x] Both halves of the fix are load-bearing: `-e staging` run outside the project → `failed to locate project directory`, so the flag change alone is insufficient
+- [x] `-n ic` still works from any directory (unchanged path, no regression)
+- [x] `/api/cycles/identity-balance?network=staging&path=<project>` → returns the balance; same value as `?network=ic`, correct since Tribez staging declares `network: ic`
+- [x] `/api/ledger/balance?network=staging&path=<project>` → `33.60875265 ICP`
+- [x] Omitting `path` for a custom environment returns a clear error rather than a wrong number
+- [x] Flag injection rejected on all four routes: `network=--help` / `--version` → `Invalid network: ...` (closes SECURITY.md finding #4)
+- [ ] `cycles mint -e <env>` executed for real — **not exercised: mints real ICP.** Flag path verified via `cycles balance`, which shares the identical Network Selection Parameters block, but the transaction itself is untested
+- [ ] Auto top-up mint path on a custom environment (same code path via `performTopUp`, not separately exercised)
 - [ ] Auto top-up saved from a staging-tier row writes under that row's network key in `.autotopup.json`
 - [ ] Behaviour when a canister is deleted while an override for it still exists (override becomes inert; not verified)
 
