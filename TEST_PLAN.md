@@ -123,7 +123,7 @@ These require interacting with the browser at http://localhost:3456.
 
 **Fleet production/staging tiers**
 
-- [x] `/api/fleet` defaults to `network=all` and scans every non-local network each project declares (verified: 29 rows — 25 on `ic`, 3 on Tribez `staging`, cost ≈ one network's worth of calls)
+- [x] `/api/fleet` defaults to `network=all` and scans every non-local network each project declares. Cost is one status call per (canister, network) pair with a resolvable ID, not networks × canisters. Observed 2026-08-04, 10 recent projects: 32 rows (26 on `ic`, 6 on `staging`), 0 errored, ~14s. Row counts are volatile — they move whenever a project deploys, so re-measure rather than trusting this line.
 - [x] `availableNetworks` returned as the union across scanned projects, `ic` always present (verified: `["ic","staging"]`)
 - [x] `?network=<name>` still scans a single network (backward-compatible)
 - [x] Default tier derives from network: `ic` → production, custom environment → staging
