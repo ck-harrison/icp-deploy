@@ -141,6 +141,16 @@ function networkArgs(network) {
   return ['--network', network];
 }
 
+// A project path used as a spawn cwd must also still exist. Recent-project
+// entries outlive the directories they point at (a project gets renamed,
+// archived, or moved), and spawning with a missing cwd fails with an empty
+// message — surfacing as `{"error":""}` rather than anything actionable.
+function assertProjectDir(p, label = 'Project path') {
+  const safe = assertSafePath(p, label);
+  if (!existsSync(safe)) throw new Error(`${label} no longer exists: ${safe}`);
+  return safe;
+}
+
 // Network args for identity- and ledger-scoped commands: `cycles mint`,
 // `cycles balance`, `token balance`, cycles-ledger calls. These differ from
 // networkArgs() in their fallback — with no network (or 'local') they still
@@ -1904,7 +1914,7 @@ app.get('/api/ledger/balance', (req, res) => {
   // lives in that project's icp.yaml. Omit it for 'ic'/local.
   let projectPath;
   if (req.query.path) {
-    try { projectPath = assertSafePath(req.query.path, 'Project path'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
   }
   const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
@@ -1923,7 +1933,7 @@ app.get('/api/cycles/identity-balance', (req, res) => {
   // Optional `path` — see /api/ledger/balance.
   let projectPath;
   if (req.query.path) {
-    try { projectPath = assertSafePath(req.query.path, 'Project path'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
   }
   const netArgs = ledgerNetworkArgs(network);
   const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
@@ -1989,7 +1999,7 @@ app.post('/api/cycles/ledger-balance', (req, res) => {
   let netArgs, projectPath;
   try {
     netArgs = ledgerNetworkArgs(network);
-    if (reqPath) projectPath = assertSafePath(reqPath, 'Project path');
+    if (reqPath) projectPath = assertProjectDir(reqPath);
   } catch (e) { return res.status(400).json({ error: e.message }); }
   const candid = `(record { owner = principal "${canisterId}"; subaccount = null })`;
   const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
@@ -2012,7 +2022,7 @@ app.post('/api/cycles/ledger-balances', (req, res) => {
   let netArgs, projectPath;
   try {
     netArgs = ledgerNetworkArgs(network);
-    if (reqPath) projectPath = assertSafePath(reqPath, 'Project path');
+    if (reqPath) projectPath = assertProjectDir(reqPath);
   } catch (e) { return res.status(400).json({ error: e.message }); }
   const results = {};
   for (const cid of canisterIds) {

@@ -17,7 +17,7 @@
 - **CSRF**: All API calls require `X-Requested-With: CanisterPanel` header.
 - **`PWD` must be set on every CLI spawn**: the `icp` CLI resolves the project manifest from the `PWD` env var, not from the spawn's `cwd`. Passing only `cwd` makes it search the server's own launch directory and fail with "project manifest not found". Every `spawn`/`spawnSync` of the CLI must pass `env: { ...process.env, HOME: process.env.HOME, PWD: cwd || process.cwd() }` — never bare `PWD: cwd`, since helpers like the identity calls are invoked with no cwd.
 - **Stale server serves pre-edit code**: `server.js` has no watch/reload. If a `node server.js` is already listening on 3456, it keeps serving the code it was started with — an API check against it silently returns pre-edit results (false green). Either restart it, or verify on a spare port with `PORT=3466 node server.js`. Don't kill a server the editor started without asking.
-- **Fleet columns are tiers, not networks**: the Fleet tab splits on `tier` (`production` | `staging`), which is a *classification*, not the network a canister is deployed on. Default is derived from the network (`ic` → production, any custom environment → staging) because projects encode staging two different ways: as an environment (Tribez, capsl: `- name: staging` with `network: ic`) or as a canister inside the `ic` environment (ICP Appstore: `frontend-staging`, `backend-staging`). The default is wrong for the second, so it is overridable per canister via `POST /api/fleet/tier`. Overrides live in the panel's settings file, never in the project's own config.
+- **Fleet columns are tiers, not networks**: the Fleet tab splits on `tier` (`production` | `staging`), which is a *classification*, not the network a canister is deployed on. Default is derived from the network (`ic` → production, any custom environment → staging) because projects encode staging two different ways: as an environment (ClubHuman, capsl: `- name: staging` with `network: ic`) or as a canister inside the `ic` environment (ICP Appstore: `frontend-staging`, `backend-staging`). The default is wrong for the second, so it is overridable per canister via `POST /api/fleet/tier`. Overrides live in the panel's settings file, never in the project's own config.
 - **`/api/fleet` scans all networks at once**: `?network=all` is the default. Needed because the staging column can contain `ic` rows. Cost is one `canister status` call per (canister, network) pair that has a resolvable ID — not networks × canisters, since most canisters exist on only one network. Don't quote a row count in docs; it changes every time a project deploys.
 - **A "staging" tier does not mean a test network**: every staging-tier canister across these projects has so far turned out to be on mainnet, burning real cycles — both the `staging` environments (which declare `network: ic`) and the `*-staging` canisters in the `ic` environment. Every Fleet row shows its network badge for this reason; don't let the yellow styling imply safety, and don't assume a future `staging` environment points at a test replica — read its `network:` field.
 - **CDN version pins**: `@babel/standalone` must stay pinned to `@7` (or a specific 7.x semver). Babel 8 changed `sourceType` default to `'module'`, causing the transpiler to emit `import` statements into a non-module `<script>` context — blank screen, no fallback. Same risk applies to any unpinned CDN build tool.
@@ -32,3 +32,15 @@ No typecheck/lint/test scripts configured. Run before reporting done:
 3. Self-review: re-read the diff for logical errors
 
 Report each check explicitly. "All good" is not a gate result.
+
+---
+
+## Operating framework
+
+This project follows Build-Priming v2.
+
+
+Modes active for this project: BUILD
+@~/frameworks/build-priming/FRAMEWORK.md
+
+Gaining a scheduled job, a walk-away batch job, or a user-facing surface is a **pre-flight event**: re-run `MODE-PICKER.md`, add the mode here, and work that playbook's Part 1 before the first run in the new mode.

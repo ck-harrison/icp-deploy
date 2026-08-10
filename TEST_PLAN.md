@@ -1,9 +1,9 @@
 # ICP Deploy — Test Plan
 
-**Last updated:** 2026-06-25
+**Last updated:** 2026-08-10
 **App URL:** http://localhost:3456
 **CLI version:** icp 1.0.0
-**Test projects:** Harrison Data (5 canisters), cleardeck-multichain (9 canisters), CME Prototype (2 canisters), capsl (3 canisters)
+**Test projects:** whatever is in the dashboard's recent-projects list — the Fleet tab scans all of them, so the set changes as projects are loaded, renamed, or archived. Per-canister counts are deliberately not listed here; they go stale on every deploy. Read the live set from the Fleet tab.
 
 Legend: `[x]` passed, `[!]` known issue, `[-]` skipped (risky/N/A), `[ ]` needs manual UI test
 
@@ -136,15 +136,16 @@ These require interacting with the browser at http://localhost:3456.
 - [x] Staging column warns when rows are on `ic` (verified: "1 of these is on ic — real mainnet cycles")
 - [x] Newly deployed canisters are picked up without a restart (verified inadvertently: `backend-staging` appeared mid-session and scanned correctly)
 - [x] Top-up modal on a staging row populates both identity balances (verified: `33.6088 ICP` / `7.74B cycles`; previously blank because the balance calls failed and were swallowed by `.catch(() => {})`)
-- [x] Balance calls from a staging row send `path` so the environment resolves (verified in Chrome: `?network=staging&path=/Users/.../Tribez`)
+- [x] Balance calls from a staging row send `path` so the environment resolves (verified in Chrome 2026-08-06 against the project then named `Tribez`, since renamed to `ClubHuman`)
+- [x] A recent-project path that no longer exists returns `Project path no longer exists: <path>` instead of `{"error":""}` (verified 2026-08-10 against the archived `Tribez` path; `assertProjectDir` at `server.js:148`)
 - [ ] Top Up from a staging-tier row actually transfers cycles — **not exercised: would spend real ICP/cycles**
 
 **`-n` vs `-e` flag bug (reported 2026-08-06: "Mint failed: project does not contain a network named 'staging'")**
 
-- [x] Reproduced at the CLI: `icp cycles balance -n staging` → `Error: project does not contain a network named 'staging'`; `-e staging` from the project dir → `Balance: 7_740_498_799 cycles`
+- [x] Reproduced at the CLI: `icp cycles balance -n staging` → `Error: project does not contain a network named 'staging'`; `-e staging` from the project dir → a balance
 - [x] Both halves of the fix are load-bearing: `-e staging` run outside the project → `failed to locate project directory`, so the flag change alone is insufficient
 - [x] `-n ic` still works from any directory (unchanged path, no regression)
-- [x] `/api/cycles/identity-balance?network=staging&path=<project>` → returns the balance; same value as `?network=ic`, correct since Tribez staging declares `network: ic`
+- [x] `/api/cycles/identity-balance?network=staging&path=<project>` → returns the balance; same value as `?network=ic`, correct since that project's staging declares `network: ic`
 - [x] `/api/ledger/balance?network=staging&path=<project>` → `33.60875265 ICP`
 - [x] Omitting `path` for a custom environment returns a clear error rather than a wrong number
 - [x] Flag injection rejected on all four routes: `network=--help` / `--version` → `Invalid network: ...` (closes SECURITY.md finding #4)
