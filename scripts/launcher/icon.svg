@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- macOS app icon for ICP Deploy. Source of truth: edit this, then re-run
+       scripts/make-launcher.sh. Never edit the .icns in the app bundle.
+       Glyph and colours match public/favicon.svg (Tailwind token icp-500/icp-400
+       gradient on the surface-900 app background). -->
+  <defs>
+    <linearGradient id="glyph" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="plate" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Plate: 856px squircle inset in the 1024 canvas, per macOS icon metrics. -->
+  <rect x="84" y="84" width="856" height="856" rx="190" fill="url(#plate)"/>
+  <rect x="84" y="84" width="856" height="856" rx="190" fill="none" stroke="#334155" stroke-width="4"/>
+
+  <!-- Glyph: favicon path (24-unit box) scaled 25x and centred, with a heavier
+       stroke than the favicon. The favicon's 1.8 weight at 21x turned to mud in
+       Finder's 16-32px views; 2.2 at 25x stays legible there and still reads
+       cleanly at 1024. Checked by rendering both sizes, not by eye at one. -->
+  <g transform="translate(212,212) scale(25)" fill="none" stroke="url(#glyph)"
+     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15.59 14.37a6 6 0 0 1-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 0 0 6.16-12.12A14.98 14.98 0 0 0 9.631 8.41m5.96 5.96a14.926 14.926 0 0 1-5.841 2.58m-.119-8.54a6 6 0 0 0-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 0 0-2.58 5.84m2.699 2.7a18.3 18.3 0 0 1-.479-8.55 18.3 18.3 0 0 1 8.55.48m-3.461 3.46a2.25 2.25 0 1 1-3.182-3.182 2.25 2.25 0 0 1 3.182 3.182ZM3.508 20.354a.75.75 0 1 1 .002-1.5.75.75 0 0 1-.002 1.5Zm-.003 2.248a.75.75 0 1 1 .002-1.5.75.75 0 0 1-.002 1.5ZM5.76 20.354a.75.75 0 1 1 .002-1.5.75.75 0 0 1-.002 1.5Z"/>
+  </g>
+</svg>

@@ -37,6 +37,27 @@ npm start
 
 Then open [http://localhost:3456](http://localhost:3456).
 
+### Dock launcher (macOS)
+
+If you would rather click an icon than open a terminal:
+
+```bash
+bash scripts/make-launcher.sh
+```
+
+That builds `~/Applications/ICP Deploy.app`. Open `~/Applications` and drag it onto the Dock, and the tile stays there.
+
+Clicking it starts the server if it is not already running, waits for it to answer, and opens the dashboard in your default browser. Clicking it again just brings up the browser: it never starts a second server. If something other than the dashboard is holding port 3456, it tells you and stops rather than interfering.
+
+Two things worth knowing:
+
+- The app is a **generated** bundle. Its sources are `scripts/launcher/launch.sh`, `Info.plist`, and `icon.svg`. Edit those, then re-run the generator; do not edit anything inside the `.app`.
+- The paths to `node`, to the `icp` CLI, and to this project are baked in when you build it, because an app launched from the Dock inherits a minimal `PATH` that contains neither Homebrew nor cargo. Re-run `make-launcher.sh` if you move the project, reinstall Node, or install `icp` afterwards.
+
+Optional: `brew install librsvg` before building, so the app gets its proper icon instead of the generic one. Everything else works either way.
+
+To run on a different port, change the `PORT=` default at the top of `scripts/launcher/launch.sh` and rebuild. (`ICP_DEPLOY_PORT` overrides it too, but only when you invoke the launcher from a shell: a Dock click does not inherit your shell environment.)
+
 ## Usage
 
 1. Paste the path to your ICP project folder (e.g. `~/Code/my-app`) and press Enter
@@ -65,6 +86,22 @@ Click **Auto top-up** on any canister to configure a minimum cycles threshold an
 
 The dashboard requires confirmation before any mainnet deploy. Reinstall mode requires typing a confirmation phrase — this is intentional. Deleting a canister also requires typing `delete this canister` to confirm.
 
+### Local replica port
+
+`icp network start` binds port 8000 by default, so it fails if anything else on your machine already serves on 8000. The error surfaces in the log pane as the network launcher exiting with status 101.
+
+To move it, add a `networks` entry to that project's `icp.yaml`:
+
+```yaml
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 4943    # or 0 to let the OS pick a free one
+```
+
+The dashboard reads the running port from the CLI rather than assuming it, so the Replica indicator and the "Open Local App" link both follow whatever you set here. Note that `gateway` goes on a `networks` entry, not at the top level of the file, and that `mode` is required.
+
 ### Snapshots
 
 Snapshots require a stopped canister. The "Create Snapshot" button handles the full stop → snapshot → restart cycle automatically.
@@ -85,8 +122,9 @@ This tool runs on localhost and is intended for single-user developer machines. 
 ## Architecture
 
 ```
-server.js          Express + WebSocket backend (~2360 lines)
-public/index.html  Single-file React frontend (~3700 lines, CDN React 18 + Babel 7)
+server.js          Express + WebSocket backend
+public/index.html  Single-file React frontend (CDN React 18 + Babel 7)
+scripts/           make-launcher.sh and the macOS launcher templates it builds from
 ```
 
 Settings are persisted to `~/.canister-panel-settings.json`. Deploy history is written to `.deploy-history.json` in each project root. Auto top-up config is written to `.autotopup.json` in each project root.

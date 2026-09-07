@@ -1867,6 +1867,10 @@
       const [folderBrowserOpen, setFolderBrowserOpen] = useState(false);
       const [replicaRunning, setReplicaRunning] = useState(false);
       const [replicaCli, setReplicaCli] = useState(null); // 'icp' | 'dfx'
+      // The port the local gateway actually uses, from the server (which reads
+      // the project's own icp.yaml). Never hardcode 8000 or 4943 against this —
+      // a project that has moved its gateway is exactly the case that breaks.
+      const [replicaPort, setReplicaPort] = useState(null);
       const [canisterStatuses, setCanisterStatuses] = useState({});
       const [cyclesLedgerBalances, setCyclesLedgerBalances] = useState({}); // canisterId -> balance string
       const [topupHistory, setTopupHistory] = useState([]);
@@ -2031,6 +2035,22 @@
         if (tab === 'fleet' && !fleet && !fleetLoading) fetchFleet();
       }, [tab]);
 
+      // Single source of truth for replica state. Passes the project path so the
+      // server can read that project's declared gateway port; every caller uses
+      // this rather than hitting /api/replica/status directly.
+      const refreshReplicaStatus = useCallback(async () => {
+        try {
+          const params = projectPath ? `?path=${encodeURIComponent(projectPath)}` : '';
+          const data = await api.get(`/api/replica/status${params}`);
+          setReplicaRunning(!!data.running);
+          if (data.cli) setReplicaCli(data.cli);
+          if (data.port) setReplicaPort(data.port);
+          return data;
+        } catch {
+          return null;
+        }
+      }, [projectPath]);
+
       // Fetch ICP ledger balance for current identity
       const fetchIcpBalance = useCallback(async () => {
         try {
@@ -2058,10 +2078,7 @@
         fetchIcpBalance();
         fetchCyclesBalance();
 
-        api.get('/api/replica/status').then((data) => {
-          setReplicaRunning(data.running);
-          if (data.cli) setReplicaCli(data.cli);
-        }).catch(() => {});
+        refreshReplicaStatus();
 
         // Load saved settings
         api.get('/api/settings').then((settings) => {
@@ -2122,6 +2139,16 @@
             setDeploySummary(null);
             setProjectLoaded(true);
             setConfigType(data.configType || 'icp.yaml');
+            // Re-check the replica against THIS project's gateway port, which the
+            // server reads from its icp.yaml. Called inline with the `path`
+            // argument rather than through refreshReplicaStatus, because
+            // loadProject is useCallback([], []) and would capture a stale
+            // projectPath — the stale-closure gotcha in CLAUDE.md.
+            api.get(`/api/replica/status?path=${encodeURIComponent(path)}`).then((s) => {
+              setReplicaRunning(!!s.running);
+              if (s.cli) setReplicaCli(s.cli);
+              if (s.port) setReplicaPort(s.port);
+            }).catch(() => {});
             fetchTopupHistory();
             fetchAutoTopUpConfig();
             // Set available networks from project config
@@ -2257,10 +2284,39 @@
       }, []);
 
       const replicaWsRef = useRef(null);
+      const [replicaStarting, setReplicaStarting] = useState(false);
+      // Guard lives in a ref, not in the state above, because startReplica is a
+      // useCallback and would read a stale `replicaStarting` (see the stale-closure
+      // gotcha in CLAUDE.md). The state exists only to disable the buttons.
+      const replicaStartingRef = useRef(false);
       const startReplica = useCallback(() => {
+        if (replicaStartingRef.current) return;
+        replicaStartingRef.current = true;
+        setReplicaStarting(true);
+        // The Start control also lives in the header, from which the log pane may
+        // not be open — and the CLI's reason for failing arrives only as log lines.
+        setRightPanel('logs');
+
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(`${protocol}//${window.location.host}`);
         replicaWsRef.current = ws;
+
+        // Every exit from this flow goes through settle(). Previously only
+        // 'replica-running' was terminal, so a failed start left the pill on
+        // "stopped" with no error and the socket open — and five leaked sockets
+        // hit the server's MAX_WS_CONNECTIONS, after which further clicks were
+        // refused before the CLI was ever reached. That is the whole bug.
+        let settled = false;
+        const settle = (report) => {
+          if (settled) return;
+          settled = true;
+          replicaStartingRef.current = false;
+          setReplicaStarting(false);
+          report();
+          try { ws.close(); } catch {}
+          replicaWsRef.current = null;
+        };
+
         ws.onopen = () => {
           ws.send(JSON.stringify({ action: 'start-replica', path: projectPath }));
           setLogs((prev) => [...prev, { type: 'info', text: 'Starting local replica...' }]);
@@ -2272,22 +2328,43 @@
             setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
           } else if (msg.type === 'status') {
             if (msg.data === 'replica-running') {
-              setReplicaRunning(true);
-              api.get('/api/replica/status').then((data) => {
-                if (data.cli) setReplicaCli(data.cli);
-              }).catch(() => {});
-              setLogs((prev) => [...prev, { type: 'info', text: 'Local replica is running' }]);
-              ws.close();
-              replicaWsRef.current = null;
+              settle(() => {
+                setReplicaRunning(true);
+                refreshReplicaStatus();
+                setLogs((prev) => [...prev, { type: 'info', text: 'Local replica is running' }]);
+                addToast('Local replica is running', 'success');
+              });
+            } else if (msg.data === 'replica-error') {
+              settle(() => {
+                setLogs((prev) => [...prev, { type: 'error', text: 'The replica failed to start — see the output above for the reason.' }]);
+                addToast('Replica failed to start — check logs', 'error');
+              });
             }
+          } else if (msg.type === 'error') {
+            // Server-side rejection, e.g. assertSafePath refusing the project path.
+            settle(() => {
+              setLogs((prev) => [...prev, { type: 'error', text: msg.data }]);
+              addToast(msg.data, 'error');
+            });
           }
         };
         ws.onerror = () => {
-          setLogs((prev) => [...prev, { type: 'error', text: 'Failed to start replica' }]);
-          ws.close();
-          replicaWsRef.current = null;
+          settle(() => {
+            setLogs((prev) => [...prev, { type: 'error', text: 'WebSocket connection failed' }]);
+            addToast('Could not reach the server', 'error');
+          });
         };
-      }, [projectPath]);
+        // A clean server-side close does not fire onerror, so without this the
+        // 1013 "Too many connections" and 1008 "invalid origin" refusals were
+        // completely invisible: the click did nothing at all, silently.
+        ws.onclose = (event) => {
+          settle(() => {
+            const why = event.reason || `connection closed (code ${event.code})`;
+            setLogs((prev) => [...prev, { type: 'error', text: `Replica start aborted — ${why}` }]);
+            addToast(`Replica start aborted — ${why}`, 'error');
+          });
+        };
+      }, [projectPath, refreshReplicaStatus]);
 
       const [loadingStatuses, setLoadingStatuses] = useState(false);
 
@@ -2616,7 +2693,7 @@
                     Replica {replicaRunning ? 'running' : 'stopped'}
                   </span>
                   {!replicaRunning && (
-                    <button onClick={startReplica} className="text-[10px] px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded hover:bg-green-500/20 transition-colors font-medium">Start</button>
+                    <button onClick={startReplica} disabled={replicaStarting} className="text-[10px] px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded hover:bg-green-500/20 disabled:opacity-40 transition-colors font-medium">{replicaStarting ? 'Starting...' : 'Start'}</button>
                   )}
                   {replicaRunning && (
                     <button onClick={async () => { await api.post('/api/replica/stop'); setReplicaRunning(false); setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]); }} className="text-[10px] px-1.5 py-0.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors font-medium">Stop</button>
@@ -2726,9 +2803,12 @@
                 if (!cid || !isValidCanisterId(cid)) return null;
                 const isLocal = network === 'local';
                 const disabled = isLocal && !replicaRunning;
+                // Port comes from the server, which reads the project's icp.yaml;
+                // the literals are only the CLI defaults for when nothing is known yet.
+                const gwPort = replicaPort || (replicaCli === 'icp' ? 8000 : 4943);
                 const localHref = replicaCli === 'icp'
-                  ? `http://${fc.name}.local.localhost:8000`
-                  : `http://${cid}.localhost:4943`;
+                  ? `http://${fc.name}.local.localhost:${gwPort}`
+                  : `http://${cid}.localhost:${gwPort}`;
                 const href = isLocal ? localHref : `https://${cid}.icp0.io`;
                 const label = isLocal ? 'Open Local App' : 'Open Live App';
                 const title = disabled ? 'Start the local replica to open this app' : undefined;
@@ -3148,10 +3228,10 @@
                       <div className="flex gap-2">
                         <button
                           onClick={startReplica}
-                          disabled={replicaRunning}
-                          className="flex-1 py-2.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-xl text-sm font-medium hover:bg-green-500/20 disabled:opacity-40 transition-colors"
+                          disabled={replicaRunning || replicaStarting}
+                          className="flex-1 py-2.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-xl text-sm font-medium hover:bg-green-500/20 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
                         >
-                          Start
+                          {replicaStarting ? <><SpinnerIcon className="w-4 h-4" /> Starting...</> : 'Start'}
                         </button>
                         <button
                           onClick={async () => {
@@ -3216,9 +3296,12 @@
                     if (!cid || !isValidCanisterId(cid)) return null;
                     const isLocal = network === 'local';
                     const disabled = isLocal && !replicaRunning;
+                    // See the sibling link above: the port is server-derived from
+                    // the project's icp.yaml, not assumed.
+                    const gwPort = replicaPort || (replicaCli === 'icp' ? 8000 : 4943);
                     const localHref = replicaCli === 'icp'
-                      ? `http://${fc.name}.local.localhost:8000`
-                      : `http://${cid}.localhost:4943`;
+                      ? `http://${fc.name}.local.localhost:${gwPort}`
+                      : `http://${cid}.localhost:${gwPort}`;
                     const href = isLocal ? localHref : `https://${cid}.icp0.io`;
                     const label = isLocal ? 'Open Local App' : 'Open Live App';
                     const title = disabled ? 'Start the local replica to open this app' : undefined;

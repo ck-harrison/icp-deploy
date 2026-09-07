@@ -2039,18 +2039,145 @@ app.post('/api/cycles/ledger-balances', (req, res) => {
   res.json(results);
 });
 
+// Resolve the port a project's local network binds, from its own icp.yaml.
+//
+// `icp network start --help` says to set `gateway.port` in icp.yaml, and that
+// instruction is wrong about the location: `gateway` is not a top-level field.
+// Verified against icp 1.0.0, whose manifest parser answers a top-level
+// `gateway:` with "unknown field `gateway`, expected one of `canisters`,
+// `networks`, `environments`". It belongs on a `networks:` entry:
+//
+//   networks:
+//     - name: local
+//       mode: managed        # managed | connected
+//       gateway:
+//         port: 4943
+//
+// Line-based like parseProjectConfig above, because this project has no YAML
+// dependency (express and ws are the only two).
+//
+// Returns null when the project declares no port, `{ port: N }` for a fixed
+// one, and `{ ephemeral: true }` for `port: 0`. Those last two are both real
+// declarations and must not be collapsed: `port: 0` means "let the OS pick",
+// so the value exists only at runtime. Treating it as an absence is what made
+// this endpoint report ICP Appstore's stopped network as running, by falling
+// back to the defaults and finding a DIFFERENT project's replica on 4943.
+function resolveGatewayConfig(projectPath, network = 'local') {
+  if (!projectPath) return null;
+  const icpYamlPath = join(projectPath, 'icp.yaml');
+  if (!existsSync(icpYamlPath)) return null;
+
+  let raw;
+  try { raw = readFileSync(icpYamlPath, 'utf-8'); } catch { return null; }
+
+  const lines = raw.split('\n');
+  const start = lines.findIndex((l) => /^networks:\s*$/.test(l));
+  if (start === -1) return null;
+
+  // The networks block runs until the next top-level key.
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\S/.test(lines[i])) { end = i; break; }
+  }
+
+  // Split the block into list items on the "- " bullets.
+  const block = lines.slice(start + 1, end);
+  const items = [];
+  for (const line of block) {
+    if (/^\s*-\s/.test(line)) items.push([line.replace(/^(\s*)-\s/, '$1  ')]);
+    else if (items.length) items[items.length - 1].push(line);
+  }
+
+  for (const item of items) {
+    const text = item.join('\n');
+    const nameMatch = text.match(/^\s*name:\s*["']?([^"'\s#]+)/m);
+    if (!nameMatch || nameMatch[1] !== network) continue;
+    // port: must be inside this item's gateway: sub-block, not a sibling key.
+    const gwIdx = item.findIndex((l) => /^\s*gateway:\s*$/.test(l));
+    if (gwIdx === -1) return null;
+    const gwIndent = item[gwIdx].search(/\S/);
+    for (let i = gwIdx + 1; i < item.length; i++) {
+      const indent = item[i].search(/\S/);
+      if (indent === -1) continue;
+      if (indent <= gwIndent) break; // left the gateway block
+      const p = item[i].match(/^\s*port:\s*(\d+)/);
+      if (p) {
+        const port = Number(p[1]);
+        if (port === 0) return { ephemeral: true };
+        return port > 0 && port < 65536 ? { port } : null;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+// What the project's local network is ACTUALLY doing, per the CLI.
+//
+// This is an observation; icp.yaml is only an intention, and it is the only
+// thing that can answer `port: 0`. It is also project-scoped, so unlike a bare
+// port probe it cannot mistake another project's replica for this one.
+//
+// `icp network status` prints, when the network is up:
+//     Api Url: http://localhost:4943/
+//     Gateway Url: http://localhost:4943/
+// and otherwise fails with "the local network for this project is not running".
+async function readLiveGatewayPort(projectPath) {
+  if (!projectPath || CLI !== 'icp') return null;
+  const result = await runCliAsync(['network', 'status'], projectPath);
+  if (!result.ok) return null;
+  const m = result.data.match(/Gateway Url:\s*https?:\/\/[^:/\s]+:(\d+)/i);
+  return m ? Number(m[1]) : null;
+}
+
 // Check if local replica is running by hitting its status endpoint directly.
 // More reliable than CLI ping (varies by version/args) and CLI-agnostic.
-app.get('/api/replica/status', async (_req, res) => {
-  const ports = [4943, 8000];
-  for (const port of ports) {
+//
+// Takes an optional `path` so the project's declared gateway port can be read.
+// Without it this probed only 8000 and 4943 and reported "stopped" for any
+// project that had moved its gateway — which is exactly what you do when
+// something else already holds 8000.
+app.get('/api/replica/status', async (req, res) => {
+  const projectPath = req.query.path || null;
+  const cfg = resolveGatewayConfig(projectPath, 'local');
+  const declared = cfg && cfg.port ? cfg.port : null;
+  const ephemeral = !!(cfg && cfg.ephemeral);
+
+  const probe = async (port) => {
     try {
-      const ctl = AbortSignal.timeout(1500);
-      const r = await fetch(`http://127.0.0.1:${port}/api/v2/status`, { signal: ctl });
-      if (r.ok) return res.json({ running: true, cli: CLI, port });
-    } catch {}
+      const r = await fetch(`http://127.0.0.1:${port}/api/v2/status`, { signal: AbortSignal.timeout(1500) });
+      return r.ok;
+    } catch { return false; }
+  };
+
+  // With a project in hand, ask the CLI what is running rather than guessing
+  // from ports. This is the only branch that can answer `port: 0`, and the only
+  // one that cannot attribute another project's replica to this one.
+  if (projectPath) {
+    const livePort = await readLiveGatewayPort(projectPath);
+    if (livePort) {
+      const running = await probe(livePort);
+      return res.json({ running, cli: CLI, port: livePort, declaredPort: declared, ephemeral });
+    }
+    // CLI says this project's network is not running. Report the port its links
+    // would use once it is — which is unknowable when the port is ephemeral.
+    return res.json({
+      running: false,
+      cli: CLI,
+      port: declared || (ephemeral ? null : CLI === 'icp' ? 8000 : 4943),
+      declaredPort: declared,
+      ephemeral,
+    });
   }
-  res.json({ running: false, cli: CLI });
+
+  // No project selected yet (app mount). Nothing better than the CLI defaults is
+  // available, and a hit here may belong to any project — hence `attributed`.
+  for (const port of [8000, 4943]) {
+    if (await probe(port)) {
+      return res.json({ running: true, cli: CLI, port, declaredPort: null, ephemeral: false, attributed: false });
+    }
+  }
+  res.json({ running: false, cli: CLI, port: CLI === 'icp' ? 8000 : 4943, declaredPort: null, ephemeral: false });
 });
 
 // Start local replica
