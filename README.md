@@ -8,7 +8,7 @@ ICP Deploy gives you a browser UI that wraps the `icp` CLI for common canister o
 
 - **Deploy** — select canisters, choose upgrade/reinstall/install mode, watch logs stream live
 - **Monitor** — see cycles balance, memory usage, running status, and module hash for every canister
-- **Fleet** — identity-wide view of every canister across all recent projects, split into Production and Staging columns you can move canisters between; grouped by project with cycles health bars and top-up controls
+- **Fleet** — identity-wide view of every canister across all recent projects, split into Production and Staging columns that you define; grouped by project with cycles health bars and top-up controls
 - **Auto top-up** — set a minimum cycles threshold per canister; the dashboard tops up automatically when the balance drops below it
 - **Controllers** — view, add, and remove canister controllers
 - **Snapshots** — create, restore, download, and delete canister snapshots (auto stop/restart handled for you)
@@ -72,11 +72,11 @@ To run on a different port, change the `PORT=` default at the top of `scripts/la
 
 The Fleet tab scans every recent project across every non-local network in one pass, and splits the result into two columns: **Production** and **Staging**. Summary cards show total cycles, low-balance count, and critical count for the column you're looking at. Each canister has a Top Up button and an Auto top-up configuration.
 
-**Which column a canister starts in** is derived from the network it's deployed on: `ic` → Production, any custom environment (`staging`, `preview`, …) → Staging.
+**Which column a canister belongs in is your call.** Production and Staging are your classification, not a property of the canister, so every row carries a **→ Staging** / **→ Production** button that records your choice. The button only changes how the dashboard groups the canister: it does not move, redeploy, or alter the canister itself. Classifications are stored in the dashboard's own settings file, never written into your project's `icp.yaml` or `dfx.json`.
 
-**Moving canisters between columns.** That default is right when staging is a whole *environment*, and wrong when staging is a *canister* inside the `ic` environment — a canister named `frontend-staging`, say. So every row has a **→ Staging** / **→ Production** button. Clicking it reclassifies that one canister and persists the choice; a reclassified row shows a `moved` chip. The button only changes how the dashboard groups the canister — it does not move, redeploy, or alter the canister itself. Overrides are stored in the dashboard's own settings file, never written into your project's `icp.yaml` or `dfx.json`.
+**Canisters you have not classified say so.** Until you classify one, the dashboard puts it somewhere by guessing from the network (`ic` to Production, any custom environment to Staging) and marks the row `undefined`. That guess is right when staging is a whole *environment*, and wrong when staging is a *canister* inside the `ic` environment, such as one named `frontend-staging`. So each tab tells you how many canisters are sitting on a guess, a **Review** button narrows the list to exactly those, and each of them offers **Keep in <column>** alongside the move button, so agreeing with the guess is recorded as a decision rather than left blank. **Keep all N in <column>** settles the whole list in one click.
 
-**Staging does not mean safe.** Every row shows a badge for the network it actually lives on. A canister can be classified as Staging and still be on `ic`, burning real mainnet cycles — the Staging column says so explicitly when that's the case. Top Up and Auto top-up always act on the canister's real network, and the identity balances in the top-up modal are read from that same network.
+**Staging does not mean safe.** Every row shows a badge for the network it really targets, resolved from the environment's `network:` field rather than its name: an environment called `staging` that declares `network: ic` shows an orange `ic` badge, because it is mainnet and burning real cycles. The Staging tab says so above the list. Where an environment declares no network at all, the dashboard reports those rows separately rather than counting them either way. Top Up and Auto top-up always act on the canister's real network, and the identity balances in the top-up modal are read from that same network.
 
 ### Auto top-up
 
@@ -112,8 +112,9 @@ This tool runs on localhost and is intended for single-user developer machines. 
 
 - All CLI calls use `spawnSync` with argument arrays — no shell string interpolation
 - All user-provided names validated against an allowlist regex before use
-- CSRF protection: requests require `X-Requested-With: XMLHttpRequest`
-- CORS locked to `localhost:3456` only
+- CSRF protection: every `/api` request must carry an `X-Requested-With` header, which a cross-origin form submission cannot set (the dashboard sends `X-Requested-With: CanisterPanel`)
+- CORS locked to `http://localhost:<port>`, the port the dashboard itself is serving on
+- The server binds `127.0.0.1` explicitly, so it is not reachable from your network even if the port is open
 - Rate limiting on sensitive endpoints (top-up, delete, identity export)
 - Content Security Policy headers on all responses
 

@@ -1527,8 +1527,12 @@
     // and a canister on a `staging` environment is staging by default (Tribez).
     // The server scans all non-local networks in one pass and tags each row with
     // its `network` and its `tier`; `onMoveTier` reclassifies a single row.
-    function FleetTab({ fleet, loading, error, tier, onSelectTier, onMoveTier, onRefresh, onTopUp, onAutoTopUp }) {
+    function FleetTab({ fleet, loading, error, tier, onSelectTier, onMoveTier, onClassifyAll, onRefresh, onTopUp, onAutoTopUp }) {
       const [showInaccessible, setShowInaccessible] = useState(false);
+      // Review mode narrows the list to rows the owner has never classified,
+      // so "define the ones not yet defined" is a filter over the real list
+      // rather than a second screen that could drift from it.
+      const [reviewUnset, setReviewUnset] = useState(false);
       const tierLabel = (t) => (t === 'production' ? 'Production' : 'Staging');
       const otherTier = tier === 'production' ? 'staging' : 'production';
 
@@ -1567,7 +1571,35 @@
       const inaccessible = entries.filter((e) => e.error);
       // Canisters classified as staging but living on mainnet still burn real
       // cycles — worth saying out loud, since the yellow chip reads as "safe".
-      const mainnetInStaging = tier === 'staging' ? entries.filter((e) => e.network === 'ic').length : 0;
+      // Count on networkResolved, never on the environment name: an environment
+      // called "staging" that declares `network: ic` IS mainnet, and counting
+      // names made this line report 2 of 9 when all 9 were on mainnet.
+      // Both counts need a server that sends `networkResolved` at all. The
+      // field is legitimately null for an undeclared environment, so presence
+      // is the test, not truthiness — and a missing field must suppress BOTH
+      // claims, not just the mainnet one. Reporting only the shortfall is the
+      // worse half to leave running: against an old server every row looked
+      // like "no network declared", which is the reassuring reading of exactly
+      // the situation this banner exists to flag.
+      const networkResolvedSupported = allEntries.length === 0 || allEntries.some((e) => 'networkResolved' in e);
+      const mainnetInStaging = tier === 'staging' && networkResolvedSupported ? entries.filter((e) => e.networkResolved === 'ic').length : 0;
+      const unresolvedInStaging = tier === 'staging' && networkResolvedSupported ? entries.filter((e) => !e.networkResolved).length : 0;
+
+      // Does the server that answered actually report tierSet? `server.js` has
+      // no watch/reload, so a browser reload picks up new frontend code while a
+      // months-old process keeps serving the old API — and an ABSENT tierSet is
+      // falsy, so every row reads as unclassified and the bulk button 404s on a
+      // route that process has never heard of. Absence is not evidence: detect
+      // the missing field and say the server is stale, rather than reporting 24
+      // undefined canisters that are nothing of the sort.
+      const tierSetSupported = allEntries.length === 0 || allEntries.some((e) => typeof e.tierSet === 'boolean');
+
+      // Rows the owner has never classified. They are in this tab on the
+      // panel's guess from the network name, which may or may not be what he
+      // means by production and staging — so they are listed as undefined
+      // rather than counted as agreement.
+      const unsetEntries = tierSetSupported ? entries.filter((e) => !e.tierSet) : [];
+      const unsetAllTiers = tierSetSupported ? allEntries.filter((e) => !e.tierSet).length : 0;
 
       // Summary numbers (BigInt-safe — cycles balances overflow Number territory fast)
       let totalCycles = 0n;
@@ -1581,9 +1613,17 @@
         if (h === 'low') lowCount++;
       }
 
-      // Group by project, preserving recent-project order from the server
+      // Group by project, preserving recent-project order from the server.
+      // Review mode narrows the LIST only: the tab counts and the cycles
+      // summary above keep describing the whole tier, so switching into review
+      // never looks like canisters disappeared.
+      const listed = reviewUnset && tierSetSupported ? accessible.filter((e) => !e.tierSet) : accessible;
+      // The unreadable rows filter the same way, so "Review N" and the rows on
+      // screen agree: an unclassified canister counts whether or not this
+      // identity can read its status, since classifying it needs neither.
+      const listedInaccessible = reviewUnset && tierSetSupported ? inaccessible.filter((e) => !e.tierSet) : inaccessible;
       const groups = [];
-      for (const e of accessible) {
+      for (const e of listed) {
         let g = groups.find((x) => x.path === e.project);
         if (!g) { g = { path: e.project, name: e.projectName, items: [] }; groups.push(g); }
         g.items.push(e);
@@ -1644,10 +1684,75 @@
             {tierLabel(tier)} — scanned {fleet?.projectsScanned ?? 0} recent project(s)
             {mainnetInStaging > 0 && (
               <span className="text-yellow-200/70">
-                · {mainnetInStaging} of these {mainnetInStaging === 1 ? 'is' : 'are'} on <span className="font-mono">ic</span> — real mainnet cycles
+                · {mainnetInStaging === entries.length
+                    ? <>every one is on <span className="font-mono">ic</span>, burning real mainnet cycles</>
+                    : <>{mainnetInStaging} of {entries.length} are on <span className="font-mono">ic</span>, burning real mainnet cycles</>}
+              </span>
+            )}
+            {unresolvedInStaging > 0 && (
+              <span className="text-yellow-200/50">
+                · {unresolvedInStaging} with no network declared in the project config
               </span>
             )}
           </div>
+
+          {/* The API answered without the field the classification UI reads.
+              Name the cause and the fix: the alternative is a screen that
+              claims every canister is unclassified and a bulk button that 404s
+              on a route this process does not have. */}
+          {!(tierSetSupported && networkResolvedSupported) && (
+            <div className="px-4 py-2.5 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">
+              This panel's server is older than the page you are looking at, so it cannot report
+              {!tierSetSupported && ' which canisters you have classified'}
+              {!tierSetSupported && !networkResolvedSupported && ' or'}
+              {!networkResolvedSupported && ' which network each environment really targets'}.
+              <span className="text-red-300/70"> Restart it (<span className="font-mono">node server.js</span>) and refresh.</span>
+            </div>
+          )}
+
+          {/* Undefined classifications. Production and staging are the owner's
+              call, so a row sitting here on the panel's guess is an open
+              question, not a setting. Counting both tabs matters: the ones you
+              have not defined are mostly in the tab you are not looking at. */}
+          {unsetEntries.length > 0 && (
+            <div className="flex items-center gap-3 flex-wrap px-4 py-2.5 rounded-xl text-sm bg-icp-500/10 border border-icp-500/20 text-icp-300">
+              <div className="w-2 h-2 rounded-full bg-icp-400" />
+              <span>
+                {unsetEntries.length} of these {unsetEntries.length === 1 ? 'has' : 'have'} no tier set by you
+                {unsetAllTiers > unsetEntries.length && (
+                  <span className="text-icp-300/60"> ({unsetAllTiers} across both tabs)</span>
+                )}
+                <span className="text-icp-300/60">, so {unsetEntries.length === 1 ? 'it is' : 'they are'} here on the panel's guess from the network name.</span>
+              </span>
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  onClick={() => setReviewUnset((v) => !v)}
+                  className={`px-3 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                    reviewUnset
+                      ? 'bg-icp-500/20 text-icp-200 border-icp-500/50'
+                      : 'bg-surface-800 text-gray-300 border-surface-700 hover:text-white hover:border-icp-500/50'
+                  }`}
+                >{reviewUnset ? 'Show all' : `Review ${unsetEntries.length}`}</button>
+                <button
+                  onClick={() => onClassifyAll(unsetEntries, tier)}
+                  className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:text-white hover:border-icp-500/50 transition-colors"
+                  title={`Record ${tierLabel(tier)} as your classification for all ${unsetEntries.length}. Changes a label in this panel only.`}
+                >Keep all {unsetEntries.length} in {tierLabel(tier)}</button>
+              </div>
+            </div>
+          )}
+
+          {/* Review mode with nothing left to review: say so, rather than
+              rendering an empty list that reads as a broken filter. */}
+          {reviewUnset && unsetEntries.length === 0 && (
+            <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm bg-surface-900 border border-surface-700 text-gray-400">
+              Every canister in {tierLabel(tier)} is classified by you.
+              <button
+                onClick={() => setReviewUnset(false)}
+                className="ml-auto px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:text-white transition-colors"
+              >Show all</button>
+            </div>
+          )}
 
           {error && (
             <div className="px-4 py-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">
@@ -1664,8 +1769,8 @@
               <p className="text-sm text-gray-400">Nothing classified as {tierLabel(tier).toLowerCase()}.</p>
               <p className="text-xs text-gray-600 mt-1.5">
                 {tier === 'staging'
-                  ? <>Canisters on a non-`ic` environment land here automatically. To classify one that lives on <span className="font-mono">ic</span> — a canister named <span className="font-mono">*-staging</span>, say — open Production and use its <span className="text-gray-400">→ Staging</span> button.</>
-                  : <>Canisters are discovered from your recent projects — load each project once on the Deploy tab and it will be scanned here.</>}
+                  ? <>Production and staging are your classification, not the network. Open Production and use any canister's <span className="text-gray-400">→ Staging</span> button to move it here.</>
+                  : <>Canisters are discovered from your recent projects. Load each project once on the Deploy tab and it will be scanned here.</>}
               </p>
             </div>
           ) : entries.length > 0 && (
@@ -1720,20 +1825,29 @@
                                 e.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
                                 'bg-gray-500/20 text-gray-300'
                               }`}>{e.type}</span>
-                              {/* Network is shown on every row: on the staging
-                                  tab it's the difference between a test replica
-                                  and a real mainnet canister. */}
+                              {/* The chip shows the network the environment
+                                  RESOLVES to, not its name: a "staging"
+                                  environment declaring `network: ic` is a real
+                                  mainnet canister, and labelling it yellow made
+                                  the tab read as safe. Orange means mainnet.
+                                  The environment name lives in the tooltip. */}
                               <span
                                 className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${
-                                  e.network === 'ic' ? 'bg-orange-500/20 text-orange-300' : 'bg-yellow-500/20 text-yellow-300'
+                                  e.networkResolved === 'ic' ? 'bg-orange-500/20 text-orange-300' :
+                                  e.networkResolved ? 'bg-yellow-500/20 text-yellow-300' :
+                                  'bg-gray-500/20 text-gray-400'
                                 }`}
-                                title={`Deployed on the "${e.network}" network`}
-                              >{e.network}</span>
-                              {e.tier !== e.tierDefault && (
+                                title={e.networkResolved
+                                  ? (e.networkResolved === e.network
+                                      ? `Deployed on the "${e.network}" network`
+                                      : `Environment "${e.network}" targets the ${e.networkResolved} network`)
+                                  : `Environment "${e.network}" declares no network in the project config`}
+                              >{e.networkResolved || e.network}</span>
+                              {tierSetSupported && !e.tierSet && (
                                 <span
                                   className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-icp-500/20 text-icp-300"
-                                  title={`Moved here manually — by network it would default to ${e.tierDefault}`}
-                                >moved</span>
+                                  title={`You have not classified ${e.name}. It is in ${tierLabel(tier)} because the panel defaults a "${e.network}" environment there.`}
+                                >undefined</span>
                               )}
                               {e.autoTopup?.enabled && (
                                 <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-green-500/20 text-green-300" title="Auto top-up enabled">Auto</span>
@@ -1785,6 +1899,17 @@
                                   : 'bg-surface-800 text-gray-400 border-surface-700 hover:text-white hover:border-surface-600'
                               }`}
                             >Auto top-up{e.autoTopup?.enabled ? ': On' : ''}</button>
+                            {/* An unclassified row offers BOTH tiers: the
+                                &rarr; button alone can only ever record the
+                                tier it is not already in, so agreeing with the
+                                panel would be unexpressible. */}
+                            {tierSetSupported && !e.tierSet && (
+                              <button
+                                onClick={() => onMoveTier(e, tier)}
+                                className="px-3 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-300 border border-icp-500/30 rounded-lg hover:bg-icp-500/20 transition-colors"
+                                title={`Record ${tierLabel(tier)} as your classification for ${e.name}.`}
+                              >Keep in {tierLabel(tier)}</button>
+                            )}
                             <button
                               onClick={() => onMoveTier(e, otherTier)}
                               className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:text-white hover:border-icp-500/50 transition-colors"
@@ -1799,36 +1924,45 @@
               ))}
 
               {/* Canisters this identity can't read */}
-              {inaccessible.length > 0 && (
+              {listedInaccessible.length > 0 && (
                 <div className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
                   <button
                     onClick={() => setShowInaccessible((v) => !v)}
                     className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-surface-800/50 transition-colors"
                   >
-                    <span className="text-sm text-gray-400">Not accessible with this identity ({inaccessible.length})</span>
+                    <span className="text-sm text-gray-400">Not accessible with this identity ({listedInaccessible.length})</span>
                     <ChevronIcon className="w-4 h-4 text-gray-500" direction={showInaccessible ? 'down' : 'right'} />
                   </button>
                   {showInaccessible && (
                     <div className="divide-y divide-surface-700/60 border-t border-surface-700">
-                      {inaccessible.map((e) => (
+                      {listedInaccessible.map((e) => (
                         <div key={e.canisterId} className="px-5 py-3 opacity-70 flex items-start justify-between gap-4">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="text-sm font-medium text-gray-300">{e.name}</span>
                               <span className="text-[11px] text-gray-600">{e.projectName}</span>
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-surface-800 text-gray-500">{e.network}</span>
-                              {e.tier !== e.tierDefault && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-icp-500/20 text-icp-300" title={`Moved here manually — by network it would default to ${e.tierDefault}`}>moved</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono bg-surface-800 text-gray-500" title={`Environment "${e.network}"`}>{e.networkResolved || e.network}</span>
+                              {tierSetSupported && !e.tierSet && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-icp-500/20 text-icp-300" title={`You have not classified ${e.name}. It is in ${tierLabel(tier)} because the panel defaults a "${e.network}" environment there.`}>undefined</span>
                               )}
                               <span className="text-[11px] text-gray-600 font-mono truncate">{e.canisterId}</span>
                             </div>
                             <p className="text-[11px] text-gray-600 mt-1 truncate" title={e.error}>{e.error}</p>
                           </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                          {tierSetSupported && !e.tierSet && (
+                            <button
+                              onClick={() => onMoveTier(e, tier)}
+                              className="px-3 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-300 border border-icp-500/30 rounded-lg hover:bg-icp-500/20 transition-colors"
+                              title={`Record ${tierLabel(tier)} as your classification for ${e.name}.`}
+                            >Keep in {tierLabel(tier)}</button>
+                          )}
                           <button
                             onClick={() => onMoveTier(e, otherTier)}
                             className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-400 border border-surface-700 rounded-lg hover:text-white hover:border-icp-500/50 transition-colors shrink-0"
                             title={`Classify ${e.name} as ${otherTier} on the Fleet page. Does not move, redeploy, or change the canister itself.`}
                           >&rarr; {tierLabel(otherTier)}</button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2010,11 +2144,37 @@
           if (data.error) { addToast(`Move failed: ${data.error}`, 'error'); return; }
           setFleet((prev) => prev ? {
             ...prev,
-            canisters: prev.canisters.map((c) => c.canisterId === entry.canisterId ? { ...c, tier: data.tier } : c),
+            canisters: prev.canisters.map((c) => c.canisterId === entry.canisterId ? { ...c, tier: data.tier, tierSet: data.tierSet } : c),
           } : prev);
           addToast(`${entry.name} → ${data.tier}`, 'success');
         } catch (e) {
           addToast(`Move failed: ${e.message}`, 'error');
+        }
+      }, [addToast]);
+
+      // Classify every row the owner has never classified, in one write. Keyed
+      // by (project, network, canister) exactly as the server stores them, and
+      // the local rows are updated from the server's own results rather than
+      // from the requested tier, so a partial disagreement would be visible.
+      const classifyAllFleet = useCallback(async (unsetEntries, tier) => {
+        if (!unsetEntries || unsetEntries.length === 0) return;
+        const items = unsetEntries.map((e) => ({
+          path: e.project, canister: e.name, network: e.network, tier,
+        }));
+        try {
+          const data = await api.post('/api/fleet/tiers', { items });
+          if (data.error) { addToast(`Classify failed: ${data.error}`, 'error'); return; }
+          const applied = new Map((data.results || []).map((r) => [`${r.project}|${r.network}|${r.canister}`, r]));
+          setFleet((prev) => prev ? {
+            ...prev,
+            canisters: prev.canisters.map((c) => {
+              const r = applied.get(`${c.project}|${c.network}|${c.name}`);
+              return r ? { ...c, tier: r.tier, tierSet: r.tierSet } : c;
+            }),
+          } : prev);
+          addToast(`${data.applied} canister${data.applied === 1 ? '' : 's'} classified as ${tier}`, 'success');
+        } catch (e) {
+          addToast(`Classify failed: ${e.message}`, 'error');
         }
       }, [addToast]);
 
@@ -3777,6 +3937,7 @@
                 tier={fleetTier}
                 onSelectTier={setFleetTier}
                 onMoveTier={moveFleetTier}
+                onClassifyAll={classifyAllFleet}
                 onRefresh={() => fetchFleet()}
                 onTopUp={openFleetTopUp}
                 onAutoTopUp={(e) => setAutoTopUpModal({ canisterName: e.name, path: e.project, network: e.network, fleet: true, current: e.autoTopup || null })}

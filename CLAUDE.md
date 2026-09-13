@@ -18,9 +18,11 @@
 - **CSRF**: All API calls require `X-Requested-With: CanisterPanel` header.
 - **`PWD` must be set on every CLI spawn**: the `icp` CLI resolves the project manifest from the `PWD` env var, not from the spawn's `cwd`. Passing only `cwd` makes it search the server's own launch directory and fail with "project manifest not found". Every `spawn`/`spawnSync` of the CLI must pass `env: { ...process.env, HOME: process.env.HOME, PWD: cwd || process.cwd() }` — never bare `PWD: cwd`, since helpers like the identity calls are invoked with no cwd.
 - **Stale server serves pre-edit code**: `server.js` has no watch/reload. If a `node server.js` is already listening on 3456, it keeps serving the code it was started with — an API check against it silently returns pre-edit results (false green). Either restart it, or verify on a spare port with `PORT=3466 node server.js`. Don't kill a server the editor started without asking.
-- **Fleet columns are tiers, not networks**: the Fleet tab splits on `tier` (`production` | `staging`), which is a *classification*, not the network a canister is deployed on. Default is derived from the network (`ic` → production, any custom environment → staging) because projects encode staging two different ways: as an environment (ClubHuman, capsl: `- name: staging` with `network: ic`) or as a canister inside the `ic` environment (ICP Appstore: `frontend-staging`, `backend-staging`). The default is wrong for the second, so it is overridable per canister via `POST /api/fleet/tier`. Overrides live in the panel's settings file, never in the project's own config.
+- **Fleet columns are tiers, not networks**: the Fleet tab splits on `tier` (`production` | `staging`), which is the *owner's classification*, not the network a canister is deployed on. Where the owner has not classified one, the panel guesses from the network (`ic` → production, any custom environment → staging) because projects encode staging two different ways: as an environment (ClubHuman, capsl: `- name: staging` with `network: ic`) or as a canister inside the `ic` environment (ICP Appstore: `frontend-staging`, `backend-staging`). The guess is wrong for the second. Set a tier via `POST /api/fleet/tier`, or many at once via `POST /api/fleet/tiers` (`{items:[...]}`, max 200, rejects the whole batch on any invalid item). Classifications live in the panel's settings file, never in the project's own config.
+- **An explicit tier is stored even when it equals the guess** — that write is the only record that the owner decided, and `tierSet` on every `/api/fleet` row is what the UI's "undefined" chip and its Review filter read. Until 2026-09-13 the write path deleted any classification equal to the network-derived default, which made "I confirmed this is production" and "nobody has ever looked at this" the same stored state. `tier: 'default'` is the way to clear one and hand the row back to the guess. Don't reintroduce pruning-on-equality: it looks like tidy housekeeping and it destroys the distinction.
 - **`/api/fleet` scans all networks at once**: `?network=all` is the default. Needed because the staging column can contain `ic` rows. Cost is one `canister status` call per (canister, network) pair that has a resolvable ID — not networks × canisters, since most canisters exist on only one network. Don't quote a row count in docs; it changes every time a project deploys.
 - **A "staging" tier does not mean a test network**: every staging-tier canister across these projects has so far turned out to be on mainnet, burning real cycles — both the `staging` environments (which declare `network: ic`) and the `*-staging` canisters in the `ic` environment. Every Fleet row shows its network badge for this reason; don't let the yellow styling imply safety, and don't assume a future `staging` environment points at a test replica — read its `network:` field.
+- **The environment name is not the network; resolve it.** `entry.network` is the environment the scan used (what the CLI needs for `-e`), so it is `staging` for ClubHuman and capsl. `resolveEnvNetwork()` reads that environment's `network:` field from `icp.yaml` and returns it as `entry.networkResolved`, and *every* claim about real cycles must count on the resolved value. Counting the name made the staging banner report "2 of these are on ic" when all 9 were on mainnet: only ICP Appstore's rows sit in an environment literally named `ic`. `networkResolved` is `null`, never `'ic'`, for an environment that declares no network (a dfx.json network, or a key that exists only in `canister_ids.json`) — unknown and not-mainnet are different claims, and the UI reports the unknowns separately rather than folding them into either count.
 - **CDN version pins**: `@babel/standalone` must stay pinned to `@7` (or a specific 7.x semver). Babel 8 changed `sourceType` default to `'module'`, causing the transpiler to emit `import` statements into a non-module `<script>` context — blank screen, no fallback. Same risk applies to any unpinned CDN build tool.
 - **Every WebSocket flow must treat *all* terminal statuses as terminal, and close on each one**: the backend emits a matched pair (`success`/`error`, `replica-running`/`replica-error`), and a frontend handler that branches on only the happy one produces the worst possible symptom — the button appears to do nothing at all. `doDeployNow` is the correct reference: a terminal-status *set*, `ws.close()` on every member, a toast on each. `startReplica` handled only `replica-running` and shipped that way; the dropped `replica-error` also leaked the socket, and five leaked sockets hit `MAX_WS_CONNECTIONS` (`server.js:2140`), after which further clicks were refused with close code 1013 before the CLI was reached. A clean server-side close does **not** fire `onerror`, so `onclose` needs its own handler or those refusals are invisible too. When adding a WS action, grep the backend for every `type: 'status'` it can send and handle each one.
 - **Replica detection asks the CLI, it does not guess ports.** `/api/replica/status` takes an optional `path` and runs `icp network status` in it, parsing `Gateway Url:` for the live port. That is an *observation*; `icp.yaml` is only an *intention*, and a bare port probe cannot tell whose replica answered — probing 8000/4943 reported a **different project's** replica as this one's. Only the no-project-selected branch still probes the defaults, and it marks the result `attributed: false` to say so. Never reintroduce a port constant here: the frontend takes `port` from this endpoint and the two "Open Local App" links derive from it.
@@ -45,11 +47,39 @@
 ## Quality gate
 
 No typecheck/lint/test scripts configured. Run before reporting done:
-1. Grep `src/` for raw hex values: `grep -rn -E '#[0-9A-Fa-f]{3,8}\b' src/ 2>/dev/null`
-2. Grep for hardcoded hosts (anything that isn't localhost or a design token reference)
-3. Self-review: re-read the diff for logical errors
 
-Report each check explicitly. "All good" is not a gate result.
+1. `node -c server.js` — the backend parses.
+2. **Transpile the frontend.** `public/index.html` is one `<script type="text/babel">`
+   block compiled in the browser, so a JSX syntax error is invisible until someone
+   loads the page and reads the console. Extract the block, run it through the same
+   `@babel/standalone@7` build with `presets:['react']`, and fail on a throw or on
+   any emitted `import` statement. This has caught a real unclosed `<span>`.
+3. **Grep the diff, not the tree.** `git diff -U0 | grep -E '^\+[^+]' | grep -E '#[0-9A-Fa-f]{3,8}\b'`
+   for raw hex, and the same shape for hardcoded hosts. *Until 2026-09-13 both
+   greps targeted `src/`, which has never existed in this repo, so the gate scanned
+   zero files and passed unconditionally.* Matches in Markdown prose are not
+   violations; read them before acting.
+4. **Exercise the change against a fresh process.** `PORT=3466 node server.js`, hit
+   the changed endpoint, assert on the body. A server started before the edit
+   returns pre-edit results as a false green.
+5. Self-review: re-read the diff for logical errors.
+
+Report each check explicitly, with its number or output. "All good" is not a gate
+result, and neither is a tick with nothing behind it.
+
+**Rendering a component headlessly is possible and worth it.** `FleetTab` was
+rendered to static HTML by transpiling the shipped `index.html`, evaluating it with
+React stubbed in, and calling `ReactDOMServer.renderToStaticMarkup` on the real
+component with a real `/api/fleet` payload. That is how the degraded-server
+behaviour was proven in both directions: strip `tierSet` and `networkResolved` from
+the payload and assert the page makes none of the claims that depend on them.
+Click-driven state (the Review filter) stays invisible to it, so say so rather than
+implying coverage.
+
+**A gate check gets canaried before it is trusted.** Plant exactly the violation,
+watch that check go red with the expected message, delete the plant. The transpile
+check above was canaried with an unclosed `<span>` and reported the correct file,
+line and reason.
 
 ---
 

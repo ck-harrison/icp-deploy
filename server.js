@@ -973,9 +973,31 @@ function defaultFleetTier(network) {
   return network === 'ic' ? 'production' : 'staging';
 }
 
+// Which real network an environment name resolves to. The name is NOT the
+// answer: `- name: staging` with `network: ic` under it is mainnet, and every
+// staging environment across these projects has so far been exactly that. The
+// fleet view uses this (never the environment name) to decide whether a row is
+// burning real cycles. Returns null when the environment is undeclared — a
+// network key that only exists in canister_ids.json, or a dfx.json network
+// whose provider we do not parse — because "unknown" and "not mainnet" are
+// different claims and collapsing them is what made the old count wrong.
+function resolveEnvNetwork(cfg, envName) {
+  if (envName === 'ic') return 'ic';
+  const env = (cfg?.environments || []).find((e) => e.name === envName);
+  return env?.network || null;
+}
+
+// The owner's classification if there is one, otherwise the panel's guess from
+// the network name. `tierSet` is the distinction the Fleet page needs to offer
+// "define the ones you have not defined": an explicit choice is ALWAYS stored,
+// even when it happens to equal the guess, so that "I confirmed this is
+// production" and "nobody has ever looked at this" are different states. They
+// were the same state until 2026-09-13, because the write path deleted any
+// override equal to the default.
 function fleetTierFor(settings, projectPath, network, canisterName) {
   const o = settings.fleetTiers?.[projectPath]?.[network]?.[canisterName];
-  return o === 'production' || o === 'staging' ? o : defaultFleetTier(network);
+  const set = o === 'production' || o === 'staging';
+  return { tier: set ? o : defaultFleetTier(network), tierSet: set };
 }
 
 // Aggregate every deployed canister across all recent projects, with cycles
@@ -1058,12 +1080,12 @@ app.get('/api/fleet', async (req, res) => {
       for (const c of (cfg.canisters || [])) {
         try { assertSafeName(c.name, 'canister'); } catch { continue; }
         if (isRemoteCanister(c, net)) continue;
-        pairs.push({ proj, canister: c, ids, autoTopup, network: net });
+        pairs.push({ proj, canister: c, ids, autoTopup, network: net, networkResolved: resolveEnvNetwork(cfg, net) });
       }
     }
   }
 
-  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup, network }) => {
+  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup, network, networkResolved }) => {
     const netArgs = networkArgs(network);
     // Resolve the canister ID from canister_ids.json first; only fall back to
     // the CLI (an extra spawn) when the file doesn't have it.
@@ -1082,7 +1104,8 @@ app.get('/api/fleet', async (req, res) => {
       type: canister.type || 'unknown',
       canisterId,
       network,
-      tier: fleetTierFor(settings, proj.path, network, canister.name),
+      networkResolved,
+      ...fleetTierFor(settings, proj.path, network, canister.name),
       tierDefault: defaultFleetTier(network),
       autoTopup: autoTopup?.[network]?.[canister.name] || null,
     };
@@ -1112,37 +1135,79 @@ app.get('/api/fleet', async (req, res) => {
   res.json({ network: requested, availableNetworks: [...networkSet], identity, principal, projectsScanned: projects.length, skipped, canisters });
 });
 
-// Move a canister between the Fleet page's production and staging columns.
-// Only non-default classifications are persisted, so changing the default rule
-// later doesn't strand stale overrides; `tier: 'default'` clears one.
-app.post('/api/fleet/tier', (req, res) => {
-  const { path: projectPath, canister, network, tier } = req.body;
-  let safePath;
-  try {
-    safePath = assertSafePath(projectPath, 'Project path');
-    assertSafeName(canister, 'canister');
-    assertSafeName(network, 'network');
-  } catch (e) { return res.status(400).json({ error: e.message }); }
-  if (!['production', 'staging', 'default'].includes(tier)) {
-    return res.status(400).json({ error: 'tier must be "production", "staging", or "default"' });
-  }
-
-  const settings = readSettings();
+// Apply one classification to the settings object in place. Returns the stored
+// result. An explicit 'production'/'staging' is always written, INCLUDING when
+// it equals the network-derived guess — that write is the whole record of the
+// owner having decided, and pruning it is what made a decided canister
+// indistinguishable from an untouched one. 'default' clears the record and
+// hands the row back to the guess.
+function applyFleetTier(settings, safePath, network, canister, tier) {
   if (!settings.fleetTiers || typeof settings.fleetTiers !== 'object') settings.fleetTiers = {};
   const byProject = settings.fleetTiers[safePath] || (settings.fleetTiers[safePath] = {});
   const byNetwork = byProject[network] || (byProject[network] = {});
 
   const fallback = defaultFleetTier(network);
-  const resolved = tier === 'default' ? fallback : tier;
-  if (resolved === fallback) delete byNetwork[canister];
-  else byNetwork[canister] = resolved;
+  const cleared = tier === 'default';
+  if (cleared) delete byNetwork[canister];
+  else byNetwork[canister] = tier;
 
   // Prune emptied branches so the settings file doesn't accrete dead keys
   if (Object.keys(byNetwork).length === 0) delete byProject[network];
   if (Object.keys(byProject).length === 0) delete settings.fleetTiers[safePath];
 
+  return { canister, network, tier: cleared ? fallback : tier, tierSet: !cleared };
+}
+
+function validateTierRequest({ path: projectPath, canister, network, tier }) {
+  const safePath = assertSafePath(projectPath, 'Project path');
+  assertSafeName(canister, 'canister');
+  assertSafeName(network, 'network');
+  if (!['production', 'staging', 'default'].includes(tier)) {
+    throw new Error('tier must be "production", "staging", or "default"');
+  }
+  return { safePath, canister, network, tier };
+}
+
+// Classify one canister into the Fleet page's production or staging column.
+// This is the owner's label and nothing else: it never moves, redeploys, or
+// touches the canister, and it is stored in the panel's settings rather than in
+// the project's own config.
+app.post('/api/fleet/tier', (req, res) => {
+  let v;
+  try { v = validateTierRequest(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const settings = readSettings();
+  const result = applyFleetTier(settings, v.safePath, v.network, v.canister, v.tier);
   writeSettings(settings);
-  res.json({ ok: true, tier: resolved, isDefault: resolved === fallback });
+  res.json({ ok: true, ...result });
+});
+
+// Batch form of the above, for "classify every canister I have not classified"
+// in one click. All-or-nothing on validation: one bad item rejects the whole
+// request rather than leaving a half-applied classification the UI would then
+// disagree with. Bounded so a malformed client can't drive an unbounded write.
+app.post('/api/fleet/tiers', (req, res) => {
+  const items = req.body?.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array' });
+  }
+  if (items.length > 200) {
+    return res.status(400).json({ error: 'items must contain 200 or fewer entries' });
+  }
+
+  const validated = [];
+  for (const [i, item] of items.entries()) {
+    try { validated.push(validateTierRequest(item || {})); }
+    catch (e) { return res.status(400).json({ error: `items[${i}]: ${e.message}` }); }
+  }
+
+  const settings = readSettings();
+  const results = validated.map((v) => ({
+    project: v.safePath,
+    ...applyFleetTier(settings, v.safePath, v.network, v.canister, v.tier),
+  }));
+  writeSettings(settings);
+  res.json({ ok: true, applied: results.length, results });
 });
 
 // ---------- Canister lifecycle operations ----------

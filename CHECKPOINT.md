@@ -2,7 +2,7 @@
 
 State-of-the-world file (CORE.md Law 10). **Read this first; update it before ending a session.**
 
-**Last updated:** 2026-09-07 15:04 UTC
+**Last updated:** 2026-09-13 15:06 UTC
 **HEAD / tree state:** run `git log -1 --oneline` and `git status --short` — not
 stated here, because saving this file changes the answer to the second one.
 **Modes active:** BUILD (declared in `CLAUDE.md`)
@@ -14,7 +14,7 @@ stated here, because saving this file changes the answer to the second one.
 A local browser dashboard for Internet Computer canister operations — a UI wrapper
 around the `icp` CLI for the things you otherwise do by hand: deploy, canister
 status, snapshots, cycles top-up, controllers, identities, and a cross-project
-Fleet view (`README.md:5-19`). Node/Express backend in one file (`server.js`) that
+Fleet view (`README.md`, "What It Does"). Node/Express backend in one file (`server.js`) that
 spawns the CLI as a child process and streams deploy output over a WebSocket;
 React frontend in one file (`public/index.html`) using CDN React 18 + Babel 7,
 transpiled in the browser. Two runtime dependencies, `express` and `ws`
@@ -26,7 +26,7 @@ stale silently, and these two files change most sessions):
 
 It is explicitly **not** a hosted product and not multi-user. It runs on this
 machine, against this machine's `icp` identity and filesystem, with no auth —
-`README.md:83` says do not expose port 3456 to a network. There is no build step,
+`README.md` ("Security") says do not expose port 3456 to a network. There is no build step,
 no typecheck, no lint, and no test suite (`CLAUDE.md`, Commands). It is also not a
 `dfx` tool any more: `43fbda7` migrated it to `icp` as the primary CLI and
 `3e7c383` removed the dfx-fallback claims from the README, though `dfx`
@@ -100,11 +100,22 @@ The most recent work:
   two is what caused that false positive. The frontend takes `port` from this one
   endpoint; both "Open Local App" links derive from it.
 - **Fleet split into Production / Staging tiers** with a per-canister move button
-  (`4067460`). The columns are *classifications*, not networks. Default derives
-  from the network (`ic` → production, custom environment → staging); overrides
-  persist to `fleetTiers[path][network][canister]` in the panel's own settings
-  file (`~/.canister-panel-settings.json`, `server.js:2424`), never into another
-  project's config.
+  (`4067460`). The columns are the owner's *classification*, not networks. An
+  unclassified row falls back to a guess from the network (`ic` → production,
+  custom environment → staging); classifications persist to
+  `fleetTiers[path][network][canister]` in the panel's own settings file
+  (`~/.canister-panel-settings.json`), never into another project's config. For
+  the current stored set, run
+  `python3 -c "import json;print(json.load(open('$HOME/.canister-panel-settings.json')).get('fleetTiers'))"`.
+- **Fleet classification is explicit, and undefined rows say so** (2026-09-13). An explicit tier is now stored even when it equals the guess,
+  so `/api/fleet` can report `tierSet` per row; the tab shows how many canisters
+  the owner has never classified, a Review filter narrowing the list to exactly
+  those, a "Keep in <tier>" button that records agreement, and a bulk
+  `POST /api/fleet/tiers`. The old "moved" badge was removed: it editorialised
+  about history the owner does not want to see. Same change fixed the staging
+  banner, which counted environment *names* and so reported 2 mainnet canisters
+  where all 9 are on mainnet; `resolveEnvNetwork()` now reads each environment's
+  `network:` field and every row carries `networkResolved`.
 - **`-n` vs `-e` flag fix** (`a3e11d0`). Six call sites built network args inline
   with `-n` and were handed environment names, so topping up a staging canister
   failed with *"project does not contain a network named 'staging'"*. Now routed
@@ -117,39 +128,55 @@ The most recent work:
 ### Deployed where
 
 Nowhere. There is no deploy target — it is run locally from the repo
-(`git clone` → `npm install` → `npm start`, `README.md:31-36`). The GitHub remote
+(`git clone` → `npm install` → `npm start`, `README.md`, "Installation"). The GitHub remote
 is `ck-harrison/icp-deploy`; `main` is the only live branch, with eight merged PR
 branches behind it.
 
 ### Verification status
 
-- `TEST_PLAN.md`: 61 items pass, 1 known issue, 2 deliberately skipped, **33 still
-  unchecked** — mostly manual browser checks predating the last two sessions.
+- `TEST_PLAN.md` status is derivable, so count it rather than trusting a number
+  here: `for m in 'x' '!' '-' ' '; do printf '%s ' "$m"; grep -c "^- \[$m\]" TEST_PLAN.md; done`.
+  The unchecked remainder is mostly manual browser checks predating the last three
+  sessions.
 - Deliberately unverified because they spend real money: `cycles mint -e <env>`
   executing for real, a real top-up from a staging row, the auto-top-up mint path
-  on a custom environment (`TEST_PLAN.md:141,152-153`). The flag path is verified
+  on a custom environment (`TEST_PLAN.md`, the unchecked `not exercised` items). The flag path is verified
   via `cycles balance`, which shares the CLI's Network Selection Parameters block;
   the transaction itself is not.
 - **`scripts/quality-gate.sh` is an unconfigured template and cannot fail.**
   `TYPECHECK_CMD="# configure"` evals to a comment and `SRC_DIR="src"` does not
   exist in this repo. Run just now against the current tree: `PASS (6 checks)`,
   exit 0. Do not trust it.
-- **`CLAUDE.md`'s quality gate is also vacuous for the same reason** — its two
-  greps target `src/`, which does not exist. What has actually caught bugs:
-  `node -c server.js`; transpiling the `<script type="text/babel">` block with
-  Babel 7 and asserting it emits no `import` statements; grepping the diff;
-  restarting on a **fresh process** and exercising the changed endpoint; and
-  driving the real UI in Chrome asserting zero console errors. The last two are
-  the ones that find things.
+- ~~**`CLAUDE.md`'s quality gate is also vacuous**~~ — **fixed 2026-09-13.** Its two
+  greps targeted `src/`, which has never existed here, so the gate scanned zero
+  files and passed unconditionally. It now names the five checks that have actually
+  caught bugs: `node -c server.js`; transpiling the `<script type="text/babel">`
+  block with Babel 7; grepping the **diff** rather than a tree; exercising the
+  change against a **fresh process**; and self-review. `scripts/quality-gate.sh` is
+  still the unconfigured template described above and is still not wired to
+  anything.
 
 ### Known open issues
+
+- **Doc line-number references rot silently, and did.** Adding ~113 lines to
+  `server.js` broke four of `SECURITY.md`'s seven findings: #3's three references
+  had drifted 36, 97 and 106 lines and one landed on a bare `});`, while
+  `CHECKPOINT.md`'s own `README.md:5-19`, `:31-36` and `:83` all moved. A stale
+  line number reads as precision and sends the reader somewhere plausible, which
+  is worse than no reference. **Fixed on 2026-09-13:** `SECURITY.md` carries zero
+  line numbers, and this file's cross-*document* references are now section names.
+  Three `server.js:NNN` refs survive here and were re-verified today (`:137`
+  `networkArgs`, `:148` `assertProjectDir`, `:171` `ledgerNetworkArgs`, all above
+  the edited region); they are the next thing to convert, and `CONTEXT.md` still
+  carries several. Check with
+  `grep -n "\.md:[0-9]\|\.js:[0-9]\|\.html:[0-9]" SECURITY.md CHECKPOINT.md`.
 
 - **6 of 7 SECURITY.md findings are Open** (#4 fixed 2026-08-06). None critical or
   high. #1 (no SRI on the four CDN `<script>` tags) and #2 (PEM private key routed
   through the browser JS heap on identity export) compound each other.
-- **`CONTEXT.md` documents 35 of 48 `/api/` endpoints.** Checked both directions
-  just now: no doc references an endpoint that no longer exists; 13 exist
-  undocumented — `autotopup/config`, `autotopup/run-now`, `autotopup/status`,
+- **`CONTEXT.md` leaves 13 `/api/` endpoints undocumented.** Checked both
+  directions on 2026-09-13: no doc references an endpoint that no longer exists;
+  these 13 exist undocumented — `autotopup/config`, `autotopup/run-now`, `autotopup/status`,
   `canister/snapshot/safe-create`, `canister/top-up`, `cycles/ledger-balances`,
   `cycles/mint`, `identity/export`, `identity/import`, `identity/new`,
   `identity/rename`, `project/network`, `topup-history`. Re-derive rather than
@@ -174,7 +201,7 @@ branches behind it.
 - **Asset canisters using `@dfinity/asset-canister@v2.1.0` show "Not accessible"**
   under icp 1.0.0 — the `assets` sync step was removed and `canister status`
   panics. The fix is in the affected *projects*, not here: five `icp.yaml` files
-  listed at `TEST_PLAN.md:59-64`.
+  listed under `TEST_PLAN.md`'s "After updating recipe versions" section.
 
 ## What's next
 
@@ -186,9 +213,11 @@ Nothing is mid-flight, so these are value-ordered, not dependency-ordered.
    ICP. Everything else in that change is verified.
 2. **Decide on `scripts/quality-gate.sh` — configure it for this stack or delete
    it.** A gate that returns PASS on every possible state of the tree is worse than
-   no gate, because it reads as evidence. Same call applies to the `src/` greps in
-   `CLAUDE.md`. This is second because it changes how every later change is
-   checked.
+   no gate, because it reads as evidence. The `CLAUDE.md` half of this was done on
+   2026-09-13; the script itself is untouched and still unconfigured, so it is now
+   the *only* thing here claiming a gate it does not run. Deleting it is the
+   cheaper answer unless someone wants to wire in the five checks `CLAUDE.md` now
+   names.
 3. **Back-fill the 13 undocumented endpoints in `CONTEXT.md`**, if that file is
    meant to be complete — or decide it is a sketch and stop measuring it. Offered
    before and not taken, which is itself an answer worth writing down.
@@ -203,7 +232,8 @@ Nothing is mid-flight, so these are value-ordered, not dependency-ordered.
 - **Changing `-n` to `-e` without also passing the project path fixes nothing.**
   Resolving an environment needs the project's `icp.yaml`, so `-e staging` run
   outside the project dir fails with `failed to locate project directory`. Both
-  halves are load-bearing — verified at the CLI, `TEST_PLAN.md:145-146`.
+  halves are load-bearing — verified at the CLI, `TEST_PLAN.md`, the `-n` vs `-e`
+  section.
 - **A `staging` tier does not mean a test network.** Every staging-tier canister
   observed so far is on mainnet burning real cycles: ClubHuman and capsl declare
   `- name: staging` with `network: ic`, and ICP Appstore's `*-staging` canisters

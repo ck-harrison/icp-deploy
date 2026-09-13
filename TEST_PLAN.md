@@ -1,6 +1,6 @@
 # ICP Deploy — Test Plan
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-09-13
 **App URL:** http://localhost:3456
 **CLI version:** icp 1.0.0
 **Test projects:** whatever is in the dashboard's recent-projects list — the Fleet tab scans all of them, so the set changes as projects are loaded, renamed, or archived. Per-canister counts are deliberately not listed here; they go stale on every deploy. Read the live set from the Fleet tab.
@@ -126,14 +126,37 @@ These require interacting with the browser at http://localhost:3456.
 - [x] `/api/fleet` defaults to `network=all` and scans every non-local network each project declares. Cost is one status call per (canister, network) pair with a resolvable ID, not networks × canisters. Observed 2026-08-04, 10 recent projects: 32 rows (26 on `ic`, 6 on `staging`), 0 errored, ~14s. Row counts are volatile — they move whenever a project deploys, so re-measure rather than trusting this line.
 - [x] `availableNetworks` returned as the union across scanned projects, `ic` always present (verified: `["ic","staging"]`)
 - [x] `?network=<name>` still scans a single network (backward-compatible)
-- [x] Default tier derives from network: `ic` → production, custom environment → staging
-- [x] `POST /api/fleet/tier` moves a canister and persists under `fleetTiers[path][network][canister]`
-- [x] `tier: 'default'` clears the override and prunes emptied branches back to `{}`
+- [x] An unclassified canister falls back to a guess from the network: `ic` → production, custom environment → staging
+- [x] `POST /api/fleet/tier` classifies a canister and persists under `fleetTiers[path][network][canister]`
+- [x] `tier: 'default'` clears the classification and prunes emptied branches back to `{}`
 - [x] Rejects an invalid tier, a path outside `$HOME`, and an unsafe canister name; missing `X-Requested-With` → 403
 - [x] Move button round-trips in the browser: 25/3 → 24/4 → 25/3, updating counts in place with no rescan and no console errors
-- [x] Override survives a full page reload (fresh load: `frontend-staging` absent from Production, present in Staging)
-- [x] Reclassified rows show a `moved` chip; every row shows its real network badge
-- [x] Staging column warns when rows are on `ic` (verified: "1 of these is on ic — real mainnet cycles")
+- [x] Classification survives a full page reload (fresh load: `frontend-staging` absent from Production, present in Staging)
+- [x] Every row shows a network badge
+
+**Owner-defined classification (2026-09-13)**
+
+- [x] An explicit tier equal to the network guess is still stored: `POST /api/fleet/tier` `{capsl, backend, ic, production}` → `{"tier":"production","tierSet":true}`, and `fleetTiers` gains `{"ic":{"backend":"production"}}`. Under the previous rule this write was deleted, making a decided canister indistinguishable from an untouched one
+- [x] `tier: 'default'` still clears it and prunes the branch
+- [x] `POST /api/fleet/tiers` applies a batch of 3 and returns `{"ok":true,"applied":3}` with per-item results
+- [x] Batch validation is all-or-nothing. Five rejections tested (bad tier in item 2 of 2, path outside `$HOME`, injection-shaped canister name, empty array, 201 items); settings file byte-identical afterwards in every case
+- [x] `/api/fleet` reports `tierSet` per row, matching what was written (5 true / 19 false against a known settings state)
+- [x] The `moved` chip is gone: classification history is not shown, only the current classification
+- [x] Live after restart: 24/24 rows carry both `tierSet` and `networkResolved`; staging tab 9 rows, 9 of 9 resolving to `ic`, 7 unclassified
+- [ ] The Review filter toggle — **not exercised: click-driven state, invisible to a static render**
+
+**Environment name is not the network (2026-09-13)**
+
+- [x] `resolveEnvNetwork()` reads each environment's `network:` field: ClubHuman and capsl `staging` rows resolve to `ic`, so all 9 staging-tier canisters are on mainnet. The banner previously counted environment *names* and reported 2 of 9, which is the reassuring reading of exactly what it exists to flag
+- [x] Staging banner now reads "every one is on `ic`, burning real mainnet cycles"
+- [x] Production tab: 15 of 15 rows resolve to `ic`
+
+**Stale-server detection (2026-09-13)**
+
+- [x] Reproduced: a browser refresh loads new page code while the old `node server.js` keeps serving. `POST /api/fleet/tiers` → HTTP 404 (process started Sep 7, file edited Sep 13); a current server answers `{"items":[]}` with 400
+- [x] Rendering the real `FleetTab` against a payload with `tierSet` and `networkResolved` stripped: 0 `undefined` chips, 0 Keep buttons, and none of the five false claims ("no tier set by you", "with no network declared", "burning real mainnet cycles", "Review N", "Keep all N"). The stale-server notice appears instead, naming both missing capabilities and `node server.js`, and all 9 rows still list
+- [x] Same render against the current payload: staging 9 rows / 5 chips / mainnet line present; production 15 rows / 14 chips; no stale notice on either
+- [x] After restarting the server: `/api/fleet/tiers` → 400 not 404, `/api/cli` → `icp 1.0.0`
 - [x] Newly deployed canisters are picked up without a restart (verified inadvertently: `backend-staging` appeared mid-session and scanned correctly)
 - [x] Top-up modal on a staging row populates both identity balances (verified: `33.6088 ICP` / `7.74B cycles`; previously blank because the balance calls failed and were swallowed by `.catch(() => {})`)
 - [x] Balance calls from a staging row send `path` so the environment resolves (verified in Chrome 2026-08-06 against the project then named `Tribez`, since renamed to `ClubHuman`)
