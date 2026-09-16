@@ -1576,14 +1576,13 @@
       // names made this line report 2 of 9 when all 9 were on mainnet.
       // Both counts need a server that sends `networkResolved` at all. The
       // field is legitimately null for an undeclared environment, so presence
-      // is the test, not truthiness — and a missing field must suppress BOTH
-      // claims, not just the mainnet one. Reporting only the shortfall is the
-      // worse half to leave running: against an old server every row looked
-      // like "no network declared", which is the reassuring reading of exactly
-      // the situation this banner exists to flag.
+      // is the test, not truthiness. The aggregate "N of these are on ic" and
+      // "N with no network declared" lines were removed on 2026-09-16 as noise:
+      // every row already carries a network badge, orange for mainnet and grey
+      // with a reason for an environment that declares nothing, which says the
+      // same thing per row and at the point of use. This flag stays because the
+      // stale-server notice below still needs to know the field is absent.
       const networkResolvedSupported = allEntries.length === 0 || allEntries.some((e) => 'networkResolved' in e);
-      const mainnetInStaging = tier === 'staging' && networkResolvedSupported ? entries.filter((e) => e.networkResolved === 'ic').length : 0;
-      const unresolvedInStaging = tier === 'staging' && networkResolvedSupported ? entries.filter((e) => !e.networkResolved).length : 0;
 
       // Does the server that answered actually report tierSet? `server.js` has
       // no watch/reload, so a browser reload picks up new frontend code while a
@@ -1636,7 +1635,7 @@
             <div>
               <h2 className="text-base font-semibold text-white">Fleet Canisters</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Every canister across your recent projects, split into production and staging
+                Every canister across your {fleet?.projectsScanned ?? 0} recent projects, split into production and staging
                 {fleet?.identity ? <span> — identity <span className="text-gray-400 font-mono">{fleet.identity}</span></span> : null}
               </p>
             </div>
@@ -1672,28 +1671,6 @@
                 </button>
               );
             })}
-          </div>
-
-          {/* Tier indicator */}
-          <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm ${
-            tier === 'production'
-              ? 'bg-orange-500/10 border border-orange-500/20 text-orange-300'
-              : 'bg-yellow-500/10 border border-yellow-500/20 text-yellow-300'
-          }`}>
-            <div className={`w-2 h-2 rounded-full ${tier === 'production' ? 'bg-orange-400' : 'bg-yellow-400'}`} />
-            {tierLabel(tier)} — scanned {fleet?.projectsScanned ?? 0} recent project(s)
-            {mainnetInStaging > 0 && (
-              <span className="text-yellow-200/70">
-                · {mainnetInStaging === entries.length
-                    ? <>every one is on <span className="font-mono">ic</span>, burning real mainnet cycles</>
-                    : <>{mainnetInStaging} of {entries.length} are on <span className="font-mono">ic</span>, burning real mainnet cycles</>}
-              </span>
-            )}
-            {unresolvedInStaging > 0 && (
-              <span className="text-yellow-200/50">
-                · {unresolvedInStaging} with no network declared in the project config
-              </span>
-            )}
           </div>
 
           {/* The API answered without the field the classification UI reads.
