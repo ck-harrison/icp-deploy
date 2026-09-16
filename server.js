@@ -994,6 +994,10 @@ function resolveEnvNetwork(cfg, envName) {
 // production" and "nobody has ever looked at this" are different states. They
 // were the same state until 2026-09-13, because the write path deleted any
 // override equal to the default.
+function fleetLedgerWatch(settings, projectPath, network, canisterName) {
+  return settings.fleetLedgerWatch?.[projectPath]?.[network]?.[canisterName] === true;
+}
+
 function fleetTierFor(settings, projectPath, network, canisterName) {
   const o = settings.fleetTiers?.[projectPath]?.[network]?.[canisterName];
   const set = o === 'production' || o === 'staging';
@@ -1107,6 +1111,12 @@ app.get('/api/fleet', async (req, res) => {
       networkResolved,
       ...fleetTierFor(settings, proj.path, network, canister.name),
       tierDefault: defaultFleetTier(network),
+      // Whether the owner asked for this row's ledger balance. The balance
+      // itself is NOT fetched here: it is read through
+      // /api/cycles/principal-balance, so there is one code path producing that
+      // number rather than a scan-time copy and an on-demand copy that could
+      // disagree.
+      ledgerWatch: fleetLedgerWatch(settings, proj.path, network, canister.name),
       autoTopup: autoTopup?.[network]?.[canister.name] || null,
     };
 
@@ -2008,6 +2018,67 @@ app.get('/api/cycles/identity-balance', (req, res) => {
   const match = result.data.match(/([\d_,]+)\s*cycles/i);
   const cycles = match ? match[1].replace(/[_,]/g, '') : result.data.trim();
   res.json({ cycles, raw: result.data });
+});
+
+// The cycles-ledger (TCYCLES) balance of an arbitrary principal, which for a
+// canister principal is a DIFFERENT number from the cycles that canister runs
+// on. The two are easy to confuse and were: ClubHuman's backend holds exactly
+// 7.5T on the ledger while running on 7.53T of its own, so the first reading of
+// this looked like the same figure twice. Nothing here can move cycles; the
+// ledger's `withdraw` goes ledger -> canister, and no management-canister
+// method takes cycles back out of a running canister.
+app.get('/api/cycles/principal-balance', (req, res) => {
+  const principal = req.query.principal;
+  if (!principal) return res.status(400).json({ error: 'principal required' });
+  try { assertSafeName(principal, 'principal'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (CLI !== 'icp') return res.status(400).json({ error: 'Cycles-ledger balances need the icp CLI' });
+
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  // `path` is required in practice for a named environment: resolving `-e` reads
+  // that project's icp.yaml, so the CLI must run with the project as cwd.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+
+  const result = runCliSync(['cycles', 'balance', ...ledgerNetworkArgs(network), '--of-principal', principal], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // icp 1.0.0 prints `Balance: 7_500_000_000_000 cycles`, and 0 for an account
+  // that has never been funded — which is a real answer, not an absence.
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  if (!match) return res.status(500).json({ error: `Could not read a balance from: ${result.data.trim()}` });
+  res.json({ principal, cycles: match[1].replace(/[_,]/g, ''), raw: result.data });
+});
+
+// Which canisters the owner wants a ledger balance shown for. Opt-in per
+// canister and persisted, because the reading costs a CLI call per canister and
+// is meaningless for most of them: of eight canisters checked on 2026-09-16,
+// five held exactly zero.
+app.post('/api/fleet/ledger-watch', (req, res) => {
+  const { path: projectPath, canister, network, enabled } = req.body || {};
+  let safePath;
+  try {
+    safePath = assertSafePath(projectPath, 'Project path');
+    assertSafeName(canister, 'canister');
+    assertSafeName(network, 'network');
+  } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+
+  const settings = readSettings();
+  if (!settings.fleetLedgerWatch || typeof settings.fleetLedgerWatch !== 'object') settings.fleetLedgerWatch = {};
+  const byProject = settings.fleetLedgerWatch[safePath] || (settings.fleetLedgerWatch[safePath] = {});
+  const byNetwork = byProject[network] || (byProject[network] = {});
+
+  if (enabled) byNetwork[canister] = true;
+  else delete byNetwork[canister];
+
+  // Prune emptied branches so the settings file doesn't accrete dead keys
+  if (Object.keys(byNetwork).length === 0) delete byProject[network];
+  if (Object.keys(byProject).length === 0) delete settings.fleetLedgerWatch[safePath];
+
+  writeSettings(settings);
+  res.json({ ok: true, canister, network, ledgerWatch: !!enabled });
 });
 
 // Mint cycles from ICP — rate limited (financial operation)

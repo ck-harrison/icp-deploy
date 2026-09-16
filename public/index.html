@@ -1527,7 +1527,7 @@
     // and a canister on a `staging` environment is staging by default (Tribez).
     // The server scans all non-local networks in one pass and tags each row with
     // its `network` and its `tier`; `onMoveTier` reclassifies a single row.
-    function FleetTab({ fleet, loading, error, tier, onSelectTier, onMoveTier, onClassifyAll, onRefresh, onTopUp, onAutoTopUp }) {
+    function FleetTab({ fleet, loading, error, tier, onSelectTier, onMoveTier, onClassifyAll, onToggleLedger, ledgerBalances, onRefresh, onTopUp, onAutoTopUp }) {
       const [showInaccessible, setShowInaccessible] = useState(false);
       // Review mode narrows the list to rows the owner has never classified,
       // so "define the ones not yet defined" is a filter over the real list
@@ -1883,6 +1883,31 @@
                             <p className="text-[10px] text-gray-600 mt-1 text-right">
                               {daysLeft !== null ? `~${daysLeft.toLocaleString()} days at idle burn` : ' '}
                             </p>
+                            {/* The ledger balance is a SECOND, different number
+                                in the same cell, so it is labelled and divided
+                                rather than sitting under the same word. The
+                                canister above runs on 7.53T of its own cycles
+                                while holding 7.5T of TCYCLES on the ledger; a
+                                shared label would read as one figure twice. */}
+                            {e.ledgerWatch && (
+                              <div
+                                className="flex items-baseline justify-between mt-1.5 pt-1.5 border-t border-surface-700/60"
+                                title={`TCYCLES held by ${e.canisterId} on the cycles ledger. A token balance owned by the canister's principal, separate from the cycles the canister runs on.`}
+                              >
+                                <span className="text-[10px] text-gray-600">Ledger</span>
+                                {ledgerBalances[e.canisterId]?.loading ? (
+                                  <span className="text-[11px] text-gray-500">reading...</span>
+                                ) : ledgerBalances[e.canisterId]?.error ? (
+                                  <span className="text-[11px] text-red-400" title={ledgerBalances[e.canisterId].error}>failed</span>
+                                ) : ledgerBalances[e.canisterId]?.cycles !== undefined ? (
+                                  <span className={`text-[11px] font-bold font-mono ${ledgerBalances[e.canisterId].cycles === '0' ? 'text-gray-500' : 'text-icp-300'}`}>
+                                    {formatCycles(ledgerBalances[e.canisterId].cycles)}<span className="text-gray-600 font-normal"> TC</span>
+                                  </span>
+                                ) : (
+                                  <span className="text-[11px] text-gray-600">not read yet</span>
+                                )}
+                              </div>
+                            )}
                           </div>
 
                           {/* Actions */}
@@ -1899,6 +1924,17 @@
                                   : 'bg-surface-800 text-gray-400 border-surface-700 hover:text-white hover:border-surface-600'
                               }`}
                             >Auto top-up{e.autoTopup?.enabled ? ': On' : ''}</button>
+                            <button
+                              onClick={() => onToggleLedger(e)}
+                              className={`px-3 py-1.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                                e.ledgerWatch
+                                  ? 'bg-icp-500/10 text-icp-300 border-icp-500/30 hover:bg-icp-500/20'
+                                  : 'bg-surface-800 text-gray-400 border-surface-700 hover:text-white hover:border-surface-600'
+                              }`}
+                              title={e.ledgerWatch
+                                ? `Stop showing the cycles-ledger (TCYCLES) balance for ${e.name}.`
+                                : `Also show the cycles-ledger (TCYCLES) balance held by ${e.name}'s principal. Off by default because it costs a CLI call per canister and is zero for most of them.`}
+                            >TCYCLES{e.ledgerWatch ? ': On' : ''}</button>
                             {/* An unclassified row offers BOTH tiers: the
                                 &rarr; button alone can only ever record the
                                 tier it is not already in, so agreeing with the
@@ -2116,13 +2152,70 @@
       }, [projectPath]);
 
       // Scan every recent project across every non-local network in one pass.
+      // Cycles-ledger (TCYCLES) balances, keyed by canister ID, for the rows the
+      // owner opted into. Read through /api/cycles/principal-balance so there is
+      // exactly one code path producing this number: the fleet scan reports only
+      // *whether* a row is watched, never a scan-time copy of the balance that
+      // could then disagree with an on-demand one.
+      const [ledgerBalances, setLedgerBalances] = useState({});
+
+      const fetchLedgerBalance = useCallback(async (entry) => {
+        setLedgerBalances((prev) => ({ ...prev, [entry.canisterId]: { loading: true } }));
+        const q = `?principal=${encodeURIComponent(entry.canisterId)}`
+          + `&network=${encodeURIComponent(entry.network)}`
+          + `&path=${encodeURIComponent(entry.project)}`;
+        try {
+          const d = await api.get(`/api/cycles/principal-balance${q}`);
+          setLedgerBalances((prev) => ({ ...prev, [entry.canisterId]: { cycles: d.cycles } }));
+        } catch (err) {
+          // Surfaced as "failed" on the row rather than a silent blank: an
+          // unread balance and a zero balance are different facts.
+          setLedgerBalances((prev) => ({ ...prev, [entry.canisterId]: { error: err.message } }));
+        }
+      }, []);
+
+      // Turn the ledger reading on or off for one canister, persisting the
+      // choice, and read the balance immediately on the way on so the row does
+      // not sit blank until the next full rescan.
+      const toggleFleetLedger = useCallback(async (entry) => {
+        const enabled = !entry.ledgerWatch;
+        try {
+          const data = await api.post('/api/fleet/ledger-watch', {
+            path: entry.project, canister: entry.name, network: entry.network, enabled,
+          });
+          if (data.error) { addToast(`TCYCLES toggle failed: ${data.error}`, 'error'); return; }
+          setFleet((prev) => prev ? {
+            ...prev,
+            canisters: prev.canisters.map((c) => c.canisterId === entry.canisterId
+              ? { ...c, ledgerWatch: data.ledgerWatch } : c),
+          } : prev);
+          if (data.ledgerWatch) fetchLedgerBalance(entry);
+          else setLedgerBalances((prev) => { const n = { ...prev }; delete n[entry.canisterId]; return n; });
+        } catch (e) {
+          addToast(`TCYCLES toggle failed: ${e.message}`, 'error');
+        }
+      }, [addToast, fetchLedgerBalance]);
+
+      // Read every watched row's balance for a freshly scanned fleet. Called
+      // from the scan rather than from an effect on the watched set: a Refresh
+      // with an unchanged set would not have re-run such an effect, so the
+      // balances would have stayed at whatever the previous scan read while
+      // every other number on the page updated.
+      const fetchWatchedLedgerBalances = useCallback((canisters) => {
+        for (const c of (canisters || [])) if (c.ledgerWatch) fetchLedgerBalance(c);
+      }, [fetchLedgerBalance]);
+
       // Both Fleet columns come from this single response — the split is by
       // `tier`, so switching columns is a filter, not a rescan.
       const fetchFleet = useCallback(async () => {
         setFleetLoading(true);
         setFleetError('');
         try {
-          setFleet(await api.get('/api/fleet'));
+          const data = await api.get('/api/fleet');
+          setFleet(data);
+          // Re-read the opted-in ledger balances for this scan, so they are as
+          // fresh as the rest of the row rather than left over from last time.
+          fetchWatchedLedgerBalances(data.canisters);
         } catch (e) {
           setFleetError(e.message);
         }
@@ -2131,7 +2224,7 @@
         // Opening the modal refetches for that canister's actual network.
         api.get('/api/ledger/balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, icp: d.balance || null }))).catch(() => {});
         api.get('/api/cycles/identity-balance?network=ic').then((d) => setFleetBalances((prev) => ({ ...prev, cycles: d.cycles || null }))).catch(() => {});
-      }, []);
+      }, [fetchWatchedLedgerBalances]);
 
       // Reclassify one canister between the Fleet page's columns. Updates the
       // row in place rather than rescanning — a rescan is ~28 CLI calls, and the
@@ -3938,6 +4031,8 @@
                 onSelectTier={setFleetTier}
                 onMoveTier={moveFleetTier}
                 onClassifyAll={classifyAllFleet}
+                onToggleLedger={toggleFleetLedger}
+                ledgerBalances={ledgerBalances}
                 onRefresh={() => fetchFleet()}
                 onTopUp={openFleetTopUp}
                 onAutoTopUp={(e) => setAutoTopUpModal({ canisterName: e.name, path: e.project, network: e.network, fleet: true, current: e.autoTopup || null })}

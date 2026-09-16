@@ -2,7 +2,7 @@
 
 State-of-the-world file (CORE.md Law 10). **Read this first; update it before ending a session.**
 
-**Last updated:** 2026-09-13 15:06 UTC
+**Last updated:** 2026-09-16 09:05 UTC
 **HEAD / tree state:** run `git log -1 --oneline` and `git status --short` — not
 stated here, because saving this file changes the answer to the second one.
 **Modes active:** BUILD (declared in `CLAUDE.md`)
@@ -116,6 +116,21 @@ The most recent work:
   banner, which counted environment *names* and so reported 2 mainnet canisters
   where all 9 are on mainnet; `resolveEnvNetwork()` now reads each environment's
   `network:` field and every row carries `networkResolved`.
+- **Optional per-canister TCYCLES ledger balance on Fleet rows** (2026-09-16). A
+  canister's principal can hold TCYCLES on the cycles ledger, which is a wholly
+  different figure from the cycles it runs on: ClubHuman's production backend runs
+  on ~7.53T while holding exactly 7.5T on the ledger, and the first reading of that
+  looked like one number printed twice. Of 13 ClubHuman/capsl canisters checked,
+  only 3 hold anything. So it is **off by default and opted into per canister** via
+  the row's TCYCLES button (`POST /api/fleet/ledger-watch`, persisted to
+  `fleetLedgerWatch[path][network][canister]`), and `/api/fleet` reports
+  `ledgerWatch` per row but never the balance — that is read only through
+  `GET /api/cycles/principal-balance`, so one code path produces the number instead
+  of a scan-time copy and an on-demand copy that could drift. Watched balances are
+  re-read from `fetchFleet` rather than from an effect on the watched set, because
+  Refresh with an unchanged set would not re-run such an effect. **Funding a
+  canister's ledger balance from its own cycles was asked for and is not possible
+  from outside the canister** — see dead ends.
 - **`-n` vs `-e` flag fix** (`a3e11d0`). Six call sites built network args inline
   with `-n` and were handed environment names, so topping up a staging canister
   failed with *"project does not contain a network named 'staging'"*. Now routed
@@ -225,6 +240,18 @@ Nothing is mid-flight, so these are value-ordered, not dependency-ordered.
    the PEM out of the browser heap. They are one threat model, not two.
 
 ## Dead ends — do not re-explore
+
+- **Cycles cannot be moved out of a running canister from outside it.** Asked for
+  on 2026-09-16 ("fund the TCYCLES balance from the canister cycles balance") and
+  dropped once checked. Every supported path runs the other way: the cycles
+  ledger's `withdraw`/`withdraw_from` send cycles ledger → canister, and
+  `icp canister top-up` does the same. There is no management-canister method that
+  takes cycles back out, `icp 1.0.0` has no `withdraw-cycles` command, and
+  `icp canister delete` has no withdraw flag (unlike `dfx canister delete
+  --withdraw-cycles-to-canister`). The only mechanism is the canister attaching its
+  own cycles to a ledger call from inside its own code, which is a change to that
+  project, not to this panel. Verified against `icp 1.0.0` help output and
+  https://docs.internetcomputer.org/blog/features/cycles-ledger on 2026-09-16.
 
 - **`icp cycles mint` has no dry-run.** There is no flag that exercises the mint
   path without spending. Don't go looking for one; the only test is a real, small

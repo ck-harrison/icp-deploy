@@ -1,6 +1,6 @@
 # ICP Deploy — Test Plan
 
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-16
 **App URL:** http://localhost:3456
 **CLI version:** icp 1.0.0
 **Test projects:** whatever is in the dashboard's recent-projects list — the Fleet tab scans all of them, so the set changes as projects are loaded, renamed, or archived. Per-canister counts are deliberately not listed here; they go stale on every deploy. Read the live set from the Fleet tab.
@@ -144,6 +144,23 @@ These require interacting with the browser at http://localhost:3456.
 - [x] The `moved` chip is gone: classification history is not shown, only the current classification
 - [x] Live after restart: 24/24 rows carry both `tierSet` and `networkResolved`; staging tab 9 rows, 9 of 9 resolving to `ic`, 7 unclassified
 - [ ] The Review filter toggle — **not exercised: click-driven state, invisible to a static render**
+
+**Cycles-ledger (TCYCLES) balance per canister (2026-09-16)**
+
+- [x] `icp cycles balance -e ic --of-principal <canisterId>` reads a canister principal's ledger balance, and it is a genuinely different number from the canister's own cycles. Verified across 13 ClubHuman/capsl canisters keyed on canister ID: 3 non-zero (7.5T, 2.1T, 162.646B), 10 at exactly zero
+- [!] First reading looked like the same figure twice: ClubHuman production backend runs on ~7.53T and holds exactly 7.5T on the ledger. Caught by the round-number heuristic and settled by querying several canisters, which returned distinct values including zeros
+- [!] A first comparison table mislabelled which project a row belonged to, because it was keyed on canister *name* and both ClubHuman and capsl have one called `backend`. Re-derived keyed on canister ID: the 162.646B belongs to ClubHuman **staging**, not capsl
+- [x] `GET /api/cycles/principal-balance` returns `{principal, cycles, raw}`; `0` for an unfunded account is returned as an answer, not an error
+- [x] Rejects a missing principal, an injection-shaped principal (`a; rm -rf /`), a **flag-shaped** principal (`--help`, which would otherwise reach an argv slot), and a `path` outside `$HOME`
+- [x] Works for both network shapes: `network=ic`, and `network=staging` where `-e` only resolves with the project as cwd (verified 162,646,000,000 for ClubHuman staging backend)
+- [x] `POST /api/fleet/ledger-watch` persists to `fleetLedgerWatch[path][network][canister]`, prunes emptied branches to the same depth as `fleetTiers`, and rejects a non-boolean `enabled`
+- [x] `/api/fleet` reports `ledgerWatch` on all 24 rows and the balance on none of them (one generator for that number)
+- [x] Rendering the real `FleetTab` with 4 of 9 staging rows watched: 4 `Ledger` lines and 5 unwatched rows without one, 9 TCYCLES toggles of which 4 read ": On", and all four states render (7.50T, `0 TC`, `reading...`, `failed`)
+- [x] Canaried: replacing the `e.ledgerWatch` guard with `true` makes all 9 rows sprout a Ledger line, so the check can see the guard
+- [x] Live on 3456 after restart: both new routes return 400 on bad input rather than 404, and a real balance reads back
+- [x] Settings file byte-identical to its pre-test backup after all of the above
+- [ ] Clicking the TCYCLES toggle in the browser — **not exercised: click-driven, invisible to a static render**
+- [-] Funding a canister's TCYCLES from its own cycles — **not possible from outside the canister.** The ledger's `withdraw` and `icp canister top-up` both go ledger → canister; no management-canister method takes cycles out of a running canister, and `icp canister delete` has no withdraw flag. Dropped from scope
 
 **Environment name is not the network (2026-09-13)**
 

@@ -78,6 +78,28 @@ The Fleet tab scans every recent project across every non-local network in one p
 
 **Staging does not mean safe.** Every row shows a badge for the network it really targets, resolved from the environment's `network:` field rather than its name: an environment called `staging` that declares `network: ic` shows an orange `ic` badge, because it is mainnet and burning real cycles. The Staging tab says so above the list. Where an environment declares no network at all, the dashboard reports those rows separately rather than counting them either way. Top Up and Auto top-up always act on the canister's real network, and the identity balances in the top-up modal are read from that same network.
 
+### TCYCLES on the cycles ledger
+
+A canister has two separate cycle figures, and confusing them is easy. The `Cycles`
+number on every Fleet row is the fuel the canister runs on. Separately, the
+canister's principal can hold **TCYCLES** as a token balance on the
+[cycles ledger](https://docs.internetcomputer.org/blog/features/cycles-ledger),
+which is a different number entirely: a canister can run on 7.53T of its own
+cycles while holding 7.5T on the ledger, or hold nothing at all. Most hold nothing.
+
+Because of that, the ledger reading is **off by default and enabled per canister**.
+Click **TCYCLES** on any row to switch it on, and a `Ledger` line appears in that
+row's cycles cell showing the balance, `reading...` while the call is in flight, or
+`failed` if it did not succeed (hover for the reason). A canister holding nothing
+reads `0 TC`, which is an answer rather than a blank. The choice is remembered, so
+the rows you care about keep showing it, and it is stored in the dashboard's own
+settings rather than in your project config. Switching it on costs one CLI call for
+that canister, which is why it is not simply always on.
+
+The dashboard only reads this balance, it cannot move it. Cycles flow from a ledger
+balance into a canister (that is what Top Up does), and there is no way to pull a
+running canister's own cycles back out to the ledger from outside the canister.
+
 ### Auto top-up
 
 Click **Auto top-up** on any canister to configure a minimum cycles threshold and a top-up amount. When the canister's balance drops below the threshold, the dashboard tops it up automatically the next time you open the Fleet or Canisters tab.
