@@ -145,6 +145,17 @@ These require interacting with the browser at http://localhost:3456.
 - [x] Live after restart: 24/24 rows carry both `tierSet` and `networkResolved`; staging tab 9 rows, 9 of 9 resolving to `ic`, 7 unclassified
 - [ ] The Review filter toggle — **not exercised: click-driven state, invisible to a static render**
 
+**Fleet audit: controllers and freezing thresholds (2026-09-16)**
+
+- [x] Derived entirely from fields `/api/fleet` already returned (`controllers`, `freezingThreshold`); no new endpoint, no extra CLI call, `server.js` unchanged
+- [x] Real findings on the live fleet: **22 of 24 canisters have a single controller** (only ClubHuman production `backend` and `frontend` have two), and **15 of 24 sit on the 30-day default freezing threshold** (8 at 90 days, 1 at 60)
+- [x] Controller spread: 2 distinct principals across 24 canisters; the one controlling all 24 is marked "this identity"
+- [x] Collapsed by default: header shows "Fleet audit / 2 findings / across both tabs" and the body does not render until expanded
+- [x] Expanded: both findings render with their denominators, 37 canister chips (22 + 15), and 15 freeze-day annotations all reading `30d`
+- [x] Canaried with a synthetic healthy fleet (two controllers everywhere, 90-day threshold): the panel does not render at all, rather than rendering an empty or reassuring one
+- [x] Canaried with one unreadable row: the denominator drops to **21 of 23**, not 22 of 24, and the panel states "1 canister could not be audited ... Counts above are out of 23, not 24". An unreadable canister is never counted as healthy
+- [ ] Expanding the panel by click in the browser — **not exercised: click-driven state.** The expanded body was rendered by flipping the initial `useState` in a throwaway copy
+
 **Cycles-ledger (TCYCLES) balance per canister (2026-09-16)**
 
 - [x] `icp cycles balance -e ic --of-principal <canisterId>` reads a canister principal's ledger balance, and it is a genuinely different number from the canister's own cycles. Verified across 13 ClubHuman/capsl canisters keyed on canister ID: 3 non-zero (7.5T, 2.1T, 162.646B), 10 at exactly zero

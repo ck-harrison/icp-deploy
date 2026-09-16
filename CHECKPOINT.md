@@ -116,6 +116,22 @@ The most recent work:
   banner, which counted environment *names* and so reported 2 mainnet canisters
   where all 9 are on mainnet; `resolveEnvNetwork()` now reads each environment's
   `network:` field and every row carries `networkResolved`.
+- **Fleet audit panel, and the two banners it replaced** (2026-09-16). The
+  "Staging/Production — scanned N recent project(s)" bars were deleted: they
+  restated the selected tab and duplicated, in alarm colours, what every row's
+  network badge already says. In their place a collapsed **Fleet audit** derives
+  two safety properties from fields the scan already returned, so it costs no
+  extra CLI calls and `server.js` did not change. It found, on the live fleet:
+  **22 of 24 canisters have a single controller** (only ClubHuman production
+  `backend` and `frontend` have two, and losing that one identity would strand
+  the other 22 across 7 projects), and **15 of 24 are on ICP's 30-day default
+  freezing threshold** — the threshold being the mechanism that turns cycle
+  exhaustion into a recoverable stop rather than deletion of the canister, its
+  state and its snapshots together. Neither was visible anywhere before; the
+  per-canister controller warning exists only on the Canisters tab, one loaded
+  project at a time. The panel reports over both tiers, renders nothing when
+  there are no findings, and excludes unreadable rows while printing the
+  denominator it used.
 - **Optional per-canister TCYCLES ledger balance on Fleet rows** (2026-09-16). A
   canister's principal can hold TCYCLES on the cycles ledger, which is a wholly
   different figure from the cycles it runs on: ClubHuman's production backend runs
@@ -221,6 +237,14 @@ branches behind it.
 ## What's next
 
 Nothing is mid-flight, so these are value-ordered, not dependency-ordered.
+
+0. **Add a second controller to the 22 single-controller canisters, and raise the
+   15 default freezing thresholds.** Surfaced by the Fleet audit on 2026-09-16 and
+   listed there by name. This is the highest-value item in the file and it is not
+   a change to this repo: it is `icp canister settings` against seven other
+   projects, and it needs the editor because it alters production canisters. Top
+   up before raising a threshold, since a threshold above the current balance
+   blocks your own upgrades.
 
 1. **Confirm the mint path with one small real top-up from a staging row.** It is
    the only unverified part of the most recent fix (`a3e11d0`), it cannot be tested

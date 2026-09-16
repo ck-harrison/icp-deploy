@@ -1533,6 +1533,7 @@
       // so "define the ones not yet defined" is a filter over the real list
       // rather than a second screen that could drift from it.
       const [reviewUnset, setReviewUnset] = useState(false);
+      const [showAudit, setShowAudit] = useState(false);
       const tierLabel = (t) => (t === 'production' ? 'Production' : 'Staging');
       const otherTier = tier === 'production' ? 'staging' : 'production';
 
@@ -1561,6 +1562,16 @@
       const healthBarColors = { great: 'bg-green-400', good: 'bg-blue-400', low: 'bg-yellow-400', critical: 'bg-red-400', unknown: 'bg-gray-600' };
       const healthBarWidth = { great: 'w-full', good: 'w-3/4', low: 'w-1/3', critical: 'w-[10%]', unknown: 'w-0' };
 
+      // ICP's own default freezing threshold. A canister left on it is one
+      // nobody has configured, which is a different fact from one deliberately
+      // set to 30 days, but they are indistinguishable from outside, so the
+      // audit says "at or below the default" rather than claiming intent.
+      const DEFAULT_FREEZE_SECONDS = 2592000; // 30 days
+      const freezeDays = (seconds) => {
+        const n = Number(seconds);
+        return Number.isFinite(n) && n > 0 ? Math.round(n / 86400) : null;
+      };
+
       const allEntries = fleet?.canisters || [];
       const tierCounts = {
         production: allEntries.filter((e) => e.tier === 'production').length,
@@ -1583,6 +1594,49 @@
       // same thing per row and at the point of use. This flag stays because the
       // stale-server notice below still needs to know the field is absent.
       const networkResolvedSupported = allEntries.length === 0 || allEntries.some((e) => 'networkResolved' in e);
+
+      // ---- Fleet audit ----------------------------------------------------
+      // Two safety properties the scan already knows about and never showed:
+      // how many canisters one lost key would strand, and how many are on a
+      // freezing threshold nobody chose. Computed over BOTH tiers on purpose:
+      // a risk in the tab you are not looking at is exactly the one you miss.
+      // Deliberately NOT rendered as a per-row chip — 22 of 24 canisters here
+      // have a single controller, so a chip on almost every row is decoration,
+      // not a signal. It is one collapsed panel, listing the affected rows.
+      const auditable = allEntries.filter((e) => !e.error);
+      const auditSkipped = allEntries.length - auditable.length;
+
+      const singleController = auditable.filter((e) => (e.controllers || []).length === 1);
+      const lowFreeze = auditable.filter((e) => {
+        const n = Number(e.freezingThreshold);
+        return Number.isFinite(n) && n > 0 && n <= DEFAULT_FREEZE_SECONDS;
+      });
+      // Every principal controlling anything, with how much it controls. An
+      // unexpected entry here is the thing worth seeing; with two principals
+      // across the fleet, printing them costs a line and a rogue addition
+      // would stand out immediately.
+      const controllerSpread = (() => {
+        const m = new Map();
+        for (const e of auditable) for (const p of (e.controllers || [])) m.set(p, (m.get(p) || 0) + 1);
+        return [...m.entries()].sort((a, b) => b[1] - a[1]);
+      })();
+
+      const auditFindings = [];
+      if (singleController.length > 0) auditFindings.push({
+        key: 'single-controller',
+        severity: 'high',
+        title: `${singleController.length} of ${auditable.length} canisters have a single controller`,
+        detail: 'If that identity is lost there is no second controller to upgrade, stop, or recover them, and no way to add one after the fact. Add a second controller from the Canisters tab.',
+        rows: singleController,
+      });
+      if (lowFreeze.length > 0) auditFindings.push({
+        key: 'low-freeze',
+        severity: 'medium',
+        title: `${lowFreeze.length} of ${auditable.length} are at or below the 30-day default freezing threshold`,
+        detail: 'The freezing threshold is what makes running out of cycles recoverable: the canister stops with its state intact instead of being deleted along with its snapshots. Raise it with canister settings, and top up before raising it, since a threshold above the current balance blocks your own upgrades.',
+        rows: lowFreeze,
+      });
+
 
       // Does the server that answered actually report tierSet? `server.js` has
       // no watch/reload, so a browser reload picks up new frontend code while a
@@ -1771,6 +1825,80 @@
                   <p className={`text-lg font-bold mt-0.5 ${criticalCount > 0 ? 'text-red-400' : 'text-gray-600'}`}>{criticalCount}</p>
                 </div>
               </div>
+
+              {/* Fleet audit. Collapsed by default and styled as a disclosure
+                  rather than an alarm bar: the findings are real but they are
+                  not news every time you open the page, and a permanent
+                  coloured banner is what made the last two get ignored. */}
+              {auditFindings.length > 0 && (
+                <div className="bg-surface-900 border border-surface-700 rounded-2xl overflow-hidden">
+                  <button
+                    onClick={() => setShowAudit((v) => !v)}
+                    className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-surface-800/50 transition-colors"
+                  >
+                    <span className="flex items-center gap-2 text-sm text-gray-300">
+                      Fleet audit
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-amber-500/20 text-amber-300">
+                        {auditFindings.length} finding{auditFindings.length === 1 ? '' : 's'}
+                      </span>
+                      <span className="text-[11px] text-gray-600">across both tabs</span>
+                    </span>
+                    <ChevronIcon className="w-4 h-4 text-gray-500" direction={showAudit ? 'down' : 'right'} />
+                  </button>
+                  {showAudit && (
+                    <div className="border-t border-surface-700 divide-y divide-surface-700/60">
+                      {auditFindings.map((f) => (
+                        <div key={f.key} className="px-5 py-4">
+                          <div className="flex items-start gap-2">
+                            <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${f.severity === 'high' ? 'bg-red-400' : 'bg-amber-400'}`} />
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium text-gray-200">{f.title}</p>
+                              <p className="text-[11px] text-gray-500 mt-1">{f.detail}</p>
+                              <div className="flex flex-wrap gap-1.5 mt-2.5">
+                                {f.rows.map((e) => (
+                                  <span
+                                    key={`${e.canisterId}-${f.key}`}
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-surface-800 text-gray-400 border border-surface-700 font-mono"
+                                    title={`${e.project}${f.key === 'low-freeze' ? ` — freezing threshold ${freezeDays(e.freezingThreshold)} days` : ''}`}
+                                  >
+                                    {e.projectName}/{e.name}
+                                    <span className="text-gray-600"> {e.network}</span>
+                                    {f.key === 'low-freeze' && (
+                                      <span className="text-amber-300/80"> {freezeDays(e.freezingThreshold)}d</span>
+                                    )}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {/* Who controls what. Not a finding on its own: the point
+                          is that an unexpected principal appearing here is
+                          visible at a glance. */}
+                      <div className="px-5 py-4">
+                        <p className="text-sm font-medium text-gray-200">
+                          Controllers in use: {controllerSpread.length} principal{controllerSpread.length === 1 ? '' : 's'}
+                        </p>
+                        <div className="mt-2 space-y-1">
+                          {controllerSpread.map(([p, n]) => (
+                            <div key={p} className="flex items-baseline gap-2 text-[11px]">
+                              <span className="text-gray-400 font-mono w-16 shrink-0">{n} canister{n === 1 ? '' : 's'}</span>
+                              <span className="text-gray-500 font-mono truncate" title={p}>{p}</span>
+                              {p === fleet?.principal && <span className="text-[10px] text-icp-300 shrink-0">this identity</span>}
+                            </div>
+                          ))}
+                        </div>
+                        {auditSkipped > 0 && (
+                          <p className="text-[11px] text-gray-600 mt-2.5">
+                            {auditSkipped} canister{auditSkipped === 1 ? '' : 's'} could not be audited: this identity cannot read {auditSkipped === 1 ? 'its' : 'their'} status, so {auditSkipped === 1 ? 'it has' : 'they have'} no controller or threshold data. Counts above are out of {auditable.length}, not {allEntries.length}.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Per-project groups */}
               {groups.map((g) => (

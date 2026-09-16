@@ -78,6 +78,32 @@ The Fleet tab scans every recent project across every non-local network in one p
 
 **Staging does not mean safe.** Every row shows a badge for the network it really targets, resolved from the environment's `network:` field rather than its name: an environment called `staging` that declares `network: ic` shows an orange `ic` badge, because it is mainnet and burning real cycles. An environment that declares no network at all shows a grey badge naming that, rather than being counted as safe. Top Up and Auto top-up always act on the canister's real network, and the identity balances in the top-up modal are read from that same network.
 
+### Fleet audit
+
+The Fleet scan already reads each canister's controllers and freezing threshold,
+so a collapsed **Fleet audit** panel reports what those two say about the fleet as
+a whole, across both tabs. It covers two things.
+
+**Single-controller canisters.** If a canister has exactly one controller and that
+identity is lost, nobody can upgrade, stop, or recover it, and a second controller
+cannot be added after the fact. The audit counts them and names them.
+
+**Canisters at or below the 30-day default freezing threshold.** The freezing
+threshold is what makes running out of cycles recoverable: the canister stops with
+its state intact rather than being deleted along with its snapshots. A canister
+still on the default is one nobody has configured. Raise it with canister settings,
+and top up first, because a threshold above the current balance blocks your own
+upgrades.
+
+It also lists every principal that controls anything, with how many canisters each
+controls, so an unexpected controller is visible at a glance. Canisters this
+identity cannot read are excluded and counted separately, because a canister whose
+status will not load is unaudited rather than healthy.
+
+The panel is collapsed by default and disappears entirely when there is nothing to
+report. Nothing in it is a per-row badge: when most of a fleet trips a check, a
+chip on every row is decoration rather than a signal.
+
 ### TCYCLES on the cycles ledger
 
 A canister has two separate cycle figures, and confusing them is easy. The `Cycles`
