@@ -171,10 +171,18 @@ This tool runs on localhost and is intended for single-user developer machines. 
 ## Architecture
 
 ```
-server.js          Express + WebSocket backend
-public/index.html  Single-file React frontend (CDN React 18 + Babel 7)
-scripts/           make-launcher.sh and the macOS launcher templates it builds from
+server.js                     Express + WebSocket backend
+public/index.html             Single-file React frontend (CDN React 18 + Babel 7)
+scripts/check-frontend.cjs    Transpile-checks the in-page JSX
+scripts/make-launcher.sh      Builds the macOS Dock launcher
+scripts/launcher/             Templates make-launcher.sh builds from
 ```
+
+There is no build step and no test suite. The frontend is one in-browser-transpiled
+script block, so a JSX syntax error would otherwise only appear in the console of
+whoever loaded the page; `node scripts/check-frontend.cjs` is the check for that. It
+pulls the pinned Babel build into a gitignored `.cache/` on first run, needs no
+`npm install`, and takes about a quarter of a second after that.
 
 Settings are persisted to `~/.canister-panel-settings.json`. Deploy history is written to `.deploy-history.json` in each project root. Auto top-up config is written to `.autotopup.json` in each project root.
 
