@@ -1,6 +1,6 @@
 # ICP Deploy — Test Plan
 
-**Last updated:** 2026-09-16
+**Last updated:** 2026-09-17
 **App URL:** http://localhost:3456
 **CLI version:** icp 1.0.0
 **Test projects:** whatever is in the dashboard's recent-projects list — the Fleet tab scans all of them, so the set changes as projects are loaded, renamed, or archived. Per-canister counts are deliberately not listed here; they go stale on every deploy. Read the live set from the Fleet tab.
@@ -24,7 +24,7 @@ Legend: `[x]` passed, `[!]` known issue, `[-]` skipped (risky/N/A), `[ ]` needs 
 | Snapshots | x | untested | Create/restore skipped |
 | Cycles top-up | x | untested | Actual top-up skipped |
 | **Auto top-up** | x | **needs test** | Added PR #5 |
-| **Fleet tab** | x | **needs test** | Added PR #6 — see known issues |
+| **Fleet tab** | x | **partly verified** | Tiers, TCYCLES and the audit are API-verified and render-verified headlessly; click-driven state is not. See the dated sections below |
 | **Top-up validation** | n/a | **needs test** | Added PR #7 |
 | Settings persistence | x | untested | |
 | Security / CSRF | x | — | |
@@ -145,6 +145,14 @@ These require interacting with the browser at http://localhost:3456.
 - [x] Live after restart: 24/24 rows carry both `tierSet` and `networkResolved`; staging tab 9 rows, 9 of 9 resolving to `ic`, 7 unclassified
 - [ ] The Review filter toggle — **not exercised: click-driven state, invisible to a static render**
 
+**Doc line-reference gate (2026-09-17)**
+
+- [x] Audited every line-number reference in every doc: 3 of 7 had rotted. `CLAUDE.md` pointed `MAX_WS_CONNECTIONS` and `PORT` at lines 2140 and 2478 of `server.js`, which actually hold a candid string and a blank line; both were off by 263 after the file grew. `CONTEXT.md` pointed `ledgerNetworkArgs` ten lines above where it lives, at a comment
+- [x] All 7 converted to symbol references; `grep -nE '\.(js|html|sh|md|json|yaml):[0-9]+' *.md` now prints nothing
+- [x] Added as gate step 5 in `CLAUDE.md` and **canaried both ways**: planting a backtick-quoted source-line reference turned it red, naming the file, line and match; removing the plant returned it to clean
+- [x] The one historical sentence that legitimately contained the pattern was reworded, so the check needs no exemption channel
+- [x] Inverse check: no doc references an `/api/` route that no longer exists in `server.js`
+
 **Fleet audit: controllers and freezing thresholds (2026-09-16)**
 
 - [x] Derived entirely from fields `/api/fleet` already returned (`controllers`, `freezingThreshold`); no new endpoint, no extra CLI call, `server.js` unchanged
@@ -188,7 +196,7 @@ These require interacting with the browser at http://localhost:3456.
 - [x] Newly deployed canisters are picked up without a restart (verified inadvertently: `backend-staging` appeared mid-session and scanned correctly)
 - [x] Top-up modal on a staging row populates both identity balances (verified: `33.6088 ICP` / `7.74B cycles`; previously blank because the balance calls failed and were swallowed by `.catch(() => {})`)
 - [x] Balance calls from a staging row send `path` so the environment resolves (verified in Chrome 2026-08-06 against the project then named `Tribez`, since renamed to `ClubHuman`)
-- [x] A recent-project path that no longer exists returns `Project path no longer exists: <path>` instead of `{"error":""}` (verified 2026-08-10 against the archived `Tribez` path; `assertProjectDir` at `server.js:148`)
+- [x] A recent-project path that no longer exists returns `Project path no longer exists: <path>` instead of `{"error":""}` (verified 2026-08-10 against the archived `Tribez` path; `assertProjectDir` in `server.js`)
 - [ ] Top Up from a staging-tier row actually transfers cycles — **not exercised: would spend real ICP/cycles**
 
 **`-n` vs `-e` flag bug (reported 2026-08-06: "Mint failed: project does not contain a network named 'staging'")**

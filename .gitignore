@@ -6,3 +6,6 @@ node_modules/
 .topup-history.json
 canister_control_panel_dx_report.md
 CONTEXT.md
+
+# Pinned Babel build fetched by scripts/check-frontend.cjs on first run
+.cache/

@@ -4,6 +4,9 @@
 
 - `node server.js` — run on port 3456
 - `node -c server.js` — syntax check backend
+- `node scripts/check-frontend.cjs` — transpile-check the in-page JSX (the only
+  automated check the frontend has). Fetches the pinned Babel build into
+  gitignored `.cache/` on first run, then runs in about 0.25s offline.
 - `bash scripts/make-launcher.sh` — (re)build the macOS Dock launcher at `~/Applications/ICP Deploy.app`
 - No build step or test suite. Frontend uses Babel in-browser transpilation — syntax errors only surface at runtime in the browser console. Always verify UI changes in the browser.
 
@@ -32,7 +35,7 @@
 - **When most of the fleet trips a check, a per-row chip is decoration.** 22 of 24 canisters here have a single controller, so a chip on each would carry no information. The audit is one collapsed disclosure that names the affected canisters, and it renders nothing at all when there are no findings. Same reason the tier banners were deleted on 2026-09-16: a permanent coloured bar that is always present is what makes a real warning cheap to ignore.
 - **30 days is ICP's default freezing threshold, so "at the default" and "deliberately set to 30 days" are indistinguishable from outside.** The audit says "at or below the 30-day default" rather than claiming nobody configured it. Raising a threshold can block your own upgrades if it exceeds the current balance, so the advice is always top up first, then raise.
 - **CDN version pins**: `@babel/standalone` must stay pinned to `@7` (or a specific 7.x semver). Babel 8 changed `sourceType` default to `'module'`, causing the transpiler to emit `import` statements into a non-module `<script>` context — blank screen, no fallback. Same risk applies to any unpinned CDN build tool.
-- **Every WebSocket flow must treat *all* terminal statuses as terminal, and close on each one**: the backend emits a matched pair (`success`/`error`, `replica-running`/`replica-error`), and a frontend handler that branches on only the happy one produces the worst possible symptom — the button appears to do nothing at all. `doDeployNow` is the correct reference: a terminal-status *set*, `ws.close()` on every member, a toast on each. `startReplica` handled only `replica-running` and shipped that way; the dropped `replica-error` also leaked the socket, and five leaked sockets hit `MAX_WS_CONNECTIONS` (`server.js:2140`), after which further clicks were refused with close code 1013 before the CLI was reached. A clean server-side close does **not** fire `onerror`, so `onclose` needs its own handler or those refusals are invisible too. When adding a WS action, grep the backend for every `type: 'status'` it can send and handle each one.
+- **Every WebSocket flow must treat *all* terminal statuses as terminal, and close on each one**: the backend emits a matched pair (`success`/`error`, `replica-running`/`replica-error`), and a frontend handler that branches on only the happy one produces the worst possible symptom — the button appears to do nothing at all. `doDeployNow` is the correct reference: a terminal-status *set*, `ws.close()` on every member, a toast on each. `startReplica` handled only `replica-running` and shipped that way; the dropped `replica-error` also leaked the socket, and five leaked sockets hit `MAX_WS_CONNECTIONS` (a `const` in `server.js`), after which further clicks were refused with close code 1013 before the CLI was reached. A clean server-side close does **not** fire `onerror`, so `onclose` needs its own handler or those refusals are invisible too. When adding a WS action, grep the backend for every `type: 'status'` it can send and handle each one.
 - **Replica detection asks the CLI, it does not guess ports.** `/api/replica/status` takes an optional `path` and runs `icp network status` in it, parsing `Gateway Url:` for the live port. That is an *observation*; `icp.yaml` is only an *intention*, and a bare port probe cannot tell whose replica answered — probing 8000/4943 reported a **different project's** replica as this one's. Only the no-project-selected branch still probes the defaults, and it marks the result `attributed: false` to say so. Never reintroduce a port constant here: the frontend takes `port` from this endpoint and the two "Open Local App" links derive from it.
 - **`gateway.port` is NOT a top-level key in `icp.yaml`, and `icp network start --help` is wrong about it.** The help text says "set `gateway.port` in `icp.yaml`"; icp 1.0.0's own parser rejects a top-level `gateway:` with ``unknown field `gateway`, expected one of `canisters`, `networks`, `environments` ``. It belongs on a `networks:` entry, and `mode` is required there (`managed` | `connected`):
   ```yaml
@@ -47,7 +50,7 @@
 - **`icp network start` has no `--clean` flag** (verified against `icp 1.0.0`): both `/api/replica/start` and the WS `start-replica` handler append `--clean` when `clean` is truthy, which would make the CLI reject the whole command. Currently latent because no frontend caller sets `clean`. `dfx start --clean` does exist, so the flag is only valid on the `dfx` branch.
 - **The Dock launcher is generated; never hand-edit the `.app`**: `~/Applications/ICP Deploy.app` is a build artifact of `scripts/make-launcher.sh`. Its three sources are `scripts/launcher/launch.sh`, `Info.plist`, and `icon.svg` — edit those and re-run the generator, which is idempotent (two runs produce byte-identical bundles). Re-run it after moving the project, reinstalling Node, or installing `icp`, because all three are pinned into the bundle at build time.
 - **A Dock-launched process has PATH=`/usr/bin:/bin:/usr/sbin:/sbin`**: no Homebrew, no cargo. So neither `node` nor the `icp` CLI that `server.js` spawns is resolvable from a Dock click, and the failure looks like the dashboard working while every operation fails. The generator resolves both and bakes their directories into the launcher's exported `PATH`. Verify after any change with `curl -H 'X-Requested-With: CanisterPanel' localhost:3456/api/cli` on a server the *launcher* started — a version string there is the proof; a server you started in a terminal proves nothing, because it inherited your shell's PATH.
-- **`ICP_DEPLOY_PORT` is the launcher's variable, `PORT` is the server's**: `server.js` reads `PORT` (`server.js:2478`); the launcher reads `ICP_DEPLOY_PORT` and must forward it as `PORT` on the spawn. Setting one without the other makes the launcher poll one port while the server listens on another, so a perfectly healthy launch times out after 18 seconds and alerts. Shipped and caught in testing.
+- **`ICP_DEPLOY_PORT` is the launcher's variable, `PORT` is the server's**: `server.js` reads `PORT` (`const PORT = process.env.PORT || 3456`); the launcher reads `ICP_DEPLOY_PORT` and must forward it as `PORT` on the spawn. Setting one without the other makes the launcher poll one port while the server listens on another, so a perfectly healthy launch times out after 18 seconds and alerts. Shipped and caught in testing.
 - **Don't probe the launcher's readiness with `curl … | grep -q` under `pipefail`**: `grep -q` exits at the first match, `curl` then dies of `SIGPIPE`, and `pipefail` reports the pipeline as failed — so the probe returns false on a healthy server every single time. `launch.sh` captures the body into a variable and matches with `case` instead. Shipped and caught in testing.
 
 ---
@@ -57,11 +60,19 @@
 No typecheck/lint/test scripts configured. Run before reporting done:
 
 1. `node -c server.js` — the backend parses.
-2. **Transpile the frontend.** `public/index.html` is one `<script type="text/babel">`
-   block compiled in the browser, so a JSX syntax error is invisible until someone
-   loads the page and reads the console. Extract the block, run it through the same
-   `@babel/standalone@7` build with `presets:['react']`, and fail on a throw or on
-   any emitted `import` statement. This has caught a real unclosed `<span>`.
+2. **`node scripts/check-frontend.cjs`** — transpiles the frontend the way the
+   browser does. `public/index.html` is one `<script type="text/babel">` block
+   compiled in-browser, so a JSX syntax error is invisible until someone loads the
+   page and reads the console; there is no build step to catch it. The script
+   extracts the block, runs it through the same pinned `@babel/standalone@7` build
+   with `presets:['react']`, and fails on a throw or on any emitted `import`
+   statement. It prints the character count it transpiled, so a pass cannot be
+   confused with having examined nothing. Exit 2 (not 1) means the check could not
+   run at all, which is not a pass. *This lived in a scratch directory until
+   2026-09-17, which meant the gate step documented here could not actually be run
+   by anyone who had not rebuilt the harness by hand, and after a session boundary
+   that was nobody. A gate that cannot be executed is not enforced.* It has caught
+   a real unclosed `<span>`, and is canaried by planting one.
 3. **Grep the diff, not the tree.** `git diff -U0 | grep -E '^\+[^+]' | grep -E '#[0-9A-Fa-f]{3,8}\b'`
    for raw hex, and the same shape for hardcoded hosts. *Until 2026-09-13 both
    greps targeted `src/`, which has never existed in this repo, so the gate scanned
@@ -70,7 +81,18 @@ No typecheck/lint/test scripts configured. Run before reporting done:
 4. **Exercise the change against a fresh process.** `PORT=3466 node server.js`, hit
    the changed endpoint, assert on the body. A server started before the edit
    returns pre-edit results as a false green.
-5. Self-review: re-read the diff for logical errors.
+5. **No line-number references in any doc.**
+   `grep -nE '\.(js|html|sh|md|json|yaml):[0-9]+' *.md` must print nothing.
+   A `file.js:NNN` reference rots the moment anything above it is edited, and it
+   rots *silently* into a plausible-looking pointer at unrelated code. This has
+   now happened twice: four of `SECURITY.md`'s seven findings on 2026-09-13
+   (one landed on a bare `});`), then `MAX_WS_CONNECTIONS` and `PORT` in this
+   file on 2026-09-16, both off by 263 lines after `server.js` grew. Cite the
+   **symbol** instead: a function name, a route, a `const`, a heading. Symbols
+   survive edits and `grep` finds them; a stale number finds nothing and misleads
+   whoever followed it. Canaried 2026-09-17 by planting a ref and watching this
+   go red.
+6. Self-review: re-read the diff for logical errors.
 
 Report each check explicitly, with its number or output. "All good" is not a gate
 result, and neither is a tick with nothing behind it.

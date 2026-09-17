@@ -1,8 +1,20 @@
+- ~~**Doc line-number references rot silently**~~ — **gated 2026-09-17, after
+  recurring.** A `file.js:NNN` reference breaks the moment anything above it is
+  edited, and it breaks *silently* into a plausible pointer at unrelated code.
+  First found 2026-09-13: four of `SECURITY.md`'s seven findings had drifted, one
+  onto a bare `});`. That fix converted `SECURITY.md` and this file but left
+  `CLAUDE.md` and `CONTEXT.md`, which this file's own note named as "the next
+  thing to convert" — and within one session two of them broke, `MAX_WS_CONNECTIONS`
+  and `PORT`, both off by 263 lines after `server.js` grew. Deferring the sweep is
+  what made it recur, so the sweep is now done everywhere **and** enforced:
+  `CLAUDE.md`'s gate step 5 greps every doc for the pattern and must print
+  nothing, canaried in both directions. Every reference now cites a symbol
+  instead, which `grep` can find and an edit cannot move.
 # CHECKPOINT — ICP Deploy
 
 State-of-the-world file (CORE.md Law 10). **Read this first; update it before ending a session.**
 
-**Last updated:** 2026-09-16 09:05 UTC
+**Last updated:** 2026-09-17 09:00 UTC
 **HEAD / tree state:** run `git log -1 --oneline` and `git status --short` — not
 stated here, because saving this file changes the answer to the second one.
 **Modes active:** BUILD (declared in `CLAUDE.md`)
@@ -150,9 +162,9 @@ The most recent work:
 - **`-n` vs `-e` flag fix** (`a3e11d0`). Six call sites built network args inline
   with `-n` and were handed environment names, so topping up a staging canister
   failed with *"project does not contain a network named 'staging'"*. Now routed
-  through `networkArgs()` (`server.js:137`) / `ledgerNetworkArgs()`
-  (`server.js:171`). Closed SECURITY.md finding #4 as a side-effect.
-- **`assertProjectDir()`** (`server.js:148`, commit `60e95ae`) — a path used as a
+  through `networkArgs()` / `ledgerNetworkArgs()`. Closed SECURITY.md finding #4
+  as a side-effect.
+- **`assertProjectDir()`** (commit `60e95ae`) — a path used as a
   spawn cwd must still exist. A stale recent-project entry previously produced
   `{"error":""}`.
 
@@ -189,10 +201,22 @@ branches behind it.
 
 ### Known open issues
 
+- ~~**The documented transpile check was not runnable**~~ — **fixed 2026-09-17.**
+  `CLAUDE.md`'s gate named it and described it in prose, but it only ever existed
+  as an ad-hoc script in a session scratch directory, which does not survive a
+  session boundary. So the single automated check the frontend has could not be
+  executed by anyone who had not rebuilt it by hand. It is now
+  `scripts/check-frontend.cjs`, committed, canaried by planting an unclosed
+  `<span>`, and it fetches the pinned Babel build into gitignored `.cache/` on
+  first run so it adds no npm dependency and runs offline in ~0.25s afterwards.
+  `.cjs` because `package.json` sets `"type": "module"`; the cached bundle is also
+  `.cjs`, or `require` loads the UMD file as an ES module and `Babel.transform`
+  comes back undefined.
+
 - **Doc line-number references rot silently, and did.** Adding ~113 lines to
   `server.js` broke four of `SECURITY.md`'s seven findings: #3's three references
   had drifted 36, 97 and 106 lines and one landed on a bare `});`, while
-  `CHECKPOINT.md`'s own `README.md:5-19`, `:31-36` and `:83` all moved. A stale
+  `CHECKPOINT.md`'s own three README line references all moved. A stale
   line number reads as precision and sends the reader somewhere plausible, which
   is worse than no reference. **Fixed on 2026-09-13:** `SECURITY.md` carries zero
   line numbers, and this file's cross-*document* references are now section names.
@@ -250,13 +274,14 @@ Nothing is mid-flight, so these are value-ordered, not dependency-ordered.
    the only unverified part of the most recent fix (`a3e11d0`), it cannot be tested
    any other way (see dead ends), and it needs the editor because it spends real
    ICP. Everything else in that change is verified.
-2. **Decide on `scripts/quality-gate.sh` — configure it for this stack or delete
+2. **Decide on `scripts/quality-gate.sh` — wire it to the real checks or delete
    it.** A gate that returns PASS on every possible state of the tree is worse than
-   no gate, because it reads as evidence. The `CLAUDE.md` half of this was done on
-   2026-09-13; the script itself is untouched and still unconfigured, so it is now
-   the *only* thing here claiming a gate it does not run. Deleting it is the
-   cheaper answer unless someone wants to wire in the five checks `CLAUDE.md` now
-   names.
+   no gate, because it reads as evidence. `CLAUDE.md`'s own gate was fixed on
+   2026-09-13 and its frontend check became a committed script on 2026-09-17, so
+   two of the six steps (`node -c server.js`, `scripts/check-frontend.cjs`) are now
+   single commands a script could just call, and the docs line-ref check is one
+   grep. That makes wiring it cheap; the template is still the only thing in the
+   repo claiming a gate it does not run.
 3. **Back-fill the 13 undocumented endpoints in `CONTEXT.md`**, if that file is
    meant to be complete — or decide it is a sketch and stop measuring it. Offered
    before and not taken, which is itself an answer worth writing down.
