@@ -25,7 +25,12 @@ const path = require('path');
 const https = require('https');
 
 const ROOT = path.join(__dirname, '..');
-const PAGE = path.join(ROOT, 'public', 'index.html');
+// Defaults to the real page, but takes an optional path so the check can be
+// canaried against a COPY carrying a planted syntax error. Without this the only
+// way to prove the check still works was to break public/index.html in place and
+// revert it, which is a discipline nobody keeps: a check you can only test by
+// mutating the file it guards is a check that stops being tested.
+const PAGE = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, 'public', 'index.html');
 const CACHE_DIR = path.join(ROOT, '.cache');
 // Cached as .cjs, not .js: package.json declares "type": "module", so a .js
 // file here is loaded as an ES module and the UMD bundle's module.exports
@@ -35,6 +40,13 @@ const BABEL = path.join(CACHE_DIR, 'babel.min.cjs');
 // which makes the transpiler emit `import` statements into a non-module script
 // context. Same pin as the <script src> in public/index.html.
 const BABEL_URL = 'https://unpkg.com/@babel/standalone@7/babel.min.js';
+
+// Repo-relative for files inside the repo, absolute for anything outside, so a
+// canary run against an external copy is unmistakably not the real page.
+function label(p) {
+  const rel = path.relative(ROOT, p);
+  return rel && !rel.startsWith('..') ? rel : p;
+}
 
 function fetchBabel() {
   return new Promise((resolve, reject) => {
@@ -67,10 +79,15 @@ function fetchBabel() {
   }
 
   const Babel = require(BABEL);
+    if (!fs.existsSync(PAGE)) {
+    console.error(`FAIL: no such file: ${PAGE}`);
+    console.error('Usage: node scripts/check-frontend.cjs [path-to-html]');
+    process.exit(2); // could not run, which is not a pass
+  }
   const html = fs.readFileSync(PAGE, 'utf-8');
   const m = html.match(/<script type="text\/babel">([\s\S]*?)<\/script>/);
   if (!m) {
-    console.error('FAIL: no <script type="text/babel"> block found in public/index.html');
+    console.error(`FAIL: no <script type="text/babel"> block found in ${label(PAGE)}`);
     process.exit(1);
   }
 
@@ -79,7 +96,7 @@ function fetchBabel() {
   try {
     out = Babel.transform(src, { presets: ['react'] }).code;
   } catch (e) {
-    console.error(`FAIL: ${e.message}`);
+    console.error(`FAIL: ${label(PAGE)}: ${e.message}`);
     process.exit(1);
   }
 
@@ -89,5 +106,5 @@ function fetchBabel() {
     console.error('Check the @babel/standalone pin: Babel 8 changed the sourceType default.');
     process.exit(1);
   }
-  console.log(`PASS: transpiled ${src.length} chars of JSX -> ${out.length} chars, no import statements emitted`);
+  console.log(`PASS: ${label(PAGE)}: transpiled ${src.length} chars of JSX -> ${out.length} chars, no import statements emitted`);
 })();

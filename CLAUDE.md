@@ -4,9 +4,14 @@
 
 - `node server.js` — run on port 3456
 - `node -c server.js` — syntax check backend
-- `node scripts/check-frontend.cjs` — transpile-check the in-page JSX (the only
-  automated check the frontend has). Fetches the pinned Babel build into
-  gitignored `.cache/` on first run, then runs in about 0.25s offline.
+- `node scripts/check-frontend.cjs [path]` — transpile-check the in-page JSX (the
+  only automated check the frontend has). Fetches the pinned Babel build into
+  gitignored `.cache/` on first run, then runs in about 0.25s offline. The
+  optional path exists so the check can be **canaried against a copy**: plant a
+  syntax error in a copy outside the repo and run it against that, instead of
+  breaking `public/index.html` in place and reverting. Exit 0 pass, 1 fail, 2
+  could-not-run; every message names the file it checked, so a canary run can
+  never be mistaken for a clean bill of health on the real page.
 - `bash scripts/make-launcher.sh` — (re)build the macOS Dock launcher at `~/Applications/ICP Deploy.app`
 - No build step or test suite. Frontend uses Babel in-browser transpilation — syntax errors only surface at runtime in the browser console. Always verify UI changes in the browser.
 
@@ -72,7 +77,8 @@ No typecheck/lint/test scripts configured. Run before reporting done:
    2026-09-17, which meant the gate step documented here could not actually be run
    by anyone who had not rebuilt the harness by hand, and after a session boundary
    that was nobody. A gate that cannot be executed is not enforced.* It has caught
-   a real unclosed `<span>`, and is canaried by planting one.
+   a real unclosed `<span>`, and is canaried by planting one **in a copy** and
+   passing that copy's path, so the canary never touches the file it guards.
 3. **Grep the diff, not the tree.** `git diff -U0 | grep -E '^\+[^+]' | grep -E '#[0-9A-Fa-f]{3,8}\b'`
    for raw hex, and the same shape for hardcoded hosts. *Until 2026-09-13 both
    greps targeted `src/`, which has never existed in this repo, so the gate scanned

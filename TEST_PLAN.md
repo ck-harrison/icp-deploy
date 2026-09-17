@@ -147,6 +147,11 @@ These require interacting with the browser at http://localhost:3456.
 
 **Doc line-reference gate (2026-09-17)**
 
+- [x] `scripts/check-frontend.cjs` takes an optional path, so the canary runs against a copy rather than requiring `public/index.html` to be broken in place and reverted. Raised by the verifier as a testability gap and fixed the same session
+- [x] Exit codes are distinct and correct: 0 on the real page, 1 on a copy carrying a planted unclosed `<span>`, 2 when the file does not exist (could-not-run, which is not a pass)
+- [x] Every message names the file checked, and an external path prints absolute rather than as `../../../../tmp/...`, so a canary run cannot read as a clean result for the real page
+- [x] `public/index.html` byte-identical to HEAD after all canary runs
+
 - [x] Audited every line-number reference in every doc: 3 of 7 had rotted. `CLAUDE.md` pointed `MAX_WS_CONNECTIONS` and `PORT` at lines 2140 and 2478 of `server.js`, which actually hold a candid string and a blank line; both were off by 263 after the file grew. `CONTEXT.md` pointed `ledgerNetworkArgs` ten lines above where it lives, at a comment
 - [x] All 7 converted to symbol references; `grep -nE '\.(js|html|sh|md|json|yaml):[0-9]+' *.md` now prints nothing
 - [x] Added as gate step 5 in `CLAUDE.md` and **canaried both ways**: planting a backtick-quoted source-line reference turned it red, naming the file, line and match; removing the plant returned it to clean
