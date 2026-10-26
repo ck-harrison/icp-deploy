@@ -1,0 +1,15 @@
+node_modules/
+.deploy-history.json
+.DS_Store
+*.log
+.claude/
+.topup-history.json
+canister_control_panel_dx_report.md
+CONTEXT.md
+
+# Pinned Babel build fetched by scripts/check-frontend.cjs on first run
+.cache/
+
+# Private working notes (kept locally, not published)
+CHECKPOINT.md
+TEST_PLAN.md

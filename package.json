@@ -1,0 +1,22 @@
+{
+  "name": "icp-deploy",
+  "version": "1.0.0",
+  "description": "Local browser dashboard for deploying and managing Internet Computer (ICP) canisters",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ck-harrison/icp-deploy.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node -c server.js && node scripts/check-frontend.cjs"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}

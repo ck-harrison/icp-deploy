@@ -1,0 +1,2846 @@
+import express from 'express';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
+import { spawn, spawnSync } from 'child_process';
+import { readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
+import { createHash } from 'crypto';
+import { gunzipSync } from 'zlib';
+import { join, dirname, resolve, sep, basename } from 'path';
+import { fileURLToPath } from 'url';
+import { tmpdir, homedir } from 'os';
+import { randomUUID } from 'crypto';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+const server = createServer(app);
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 }); // 64KB max message size
+
+app.use(express.json({ limit: '50kb' }));
+
+// Simple rate limiter — per-IP, sliding window
+const rateLimitMap = new Map();
+function rateLimit(windowMs, maxRequests) {
+  return (req, res, next) => {
+    const key = req.ip;
+    const now = Date.now();
+    if (!rateLimitMap.has(key)) rateLimitMap.set(key, []);
+    const timestamps = rateLimitMap.get(key).filter(t => now - t < windowMs);
+    if (timestamps.length >= maxRequests) {
+      // Refresh the stored (filtered) timestamps so stale entries don't linger.
+      rateLimitMap.set(key, timestamps);
+      return res.status(429).json({ error: 'Too many requests — try again later' });
+    }
+    timestamps.push(now);
+    if (timestamps.length === 0) {
+      // After filtering, no live timestamps remain — drop the key so the map doesn't leak.
+      rateLimitMap.delete(key);
+    } else {
+      rateLimitMap.set(key, timestamps);
+    }
+    next();
+  };
+}
+
+// Security middleware — CORS + CSRF protection (must be before static files and routes)
+app.use((req, res, next) => {
+  // CORS — strict origin check (only allow same localhost:PORT)
+  const origin = req.headers.origin;
+  const allowed = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+  if (origin && !allowed.includes(origin)) {
+    return res.status(403).json({ error: 'Forbidden: cross-origin request blocked' });
+  }
+  res.setHeader('Access-Control-Allow-Origin', `http://localhost:${PORT}`);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+  // Security headers — prevent clickjacking, MIME sniffing, and XSS
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:*; img-src 'self' data:;");
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Require X-Requested-With header on all API routes to prevent CSRF via form submissions
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'OPTIONS' && !req.headers['x-requested-with']) {
+    return res.status(403).json({ error: 'Forbidden: missing required header' });
+  }
+  next();
+});
+
+// Validate projectPath on all POST API routes that include a path in the body
+app.use('/api', (req, res, next) => {
+  if (req.method === 'POST' && req.body && req.body.path) {
+    try {
+      req.body.path = assertSafePath(req.body.path, 'Project path');
+    } catch (e) {
+      return res.status(403).json({ error: e.message });
+    }
+  }
+  next();
+});
+
+app.use(express.static(join(__dirname, 'public'), {
+  etag: false,
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+  },
+}));
+
+// ---------- CLI detection ----------
+
+// Validate inputs to prevent injection via argument values
+const SAFE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-]*$/;
+function assertSafeName(name, label = 'name') {
+  if (!name || !SAFE_NAME_RE.test(name)) {
+    throw new Error(`Invalid ${label}: must start with alphanumeric, then alphanumeric/hyphens/underscores`);
+  }
+}
+
+// Validate project paths — must be within user's home directory
+// os.homedir() falls back to USERPROFILE on Windows, where HOME is unset.
+const HOME = process.env.HOME || homedir();
+function assertSafePath(p, label = 'path') {
+  if (!p) throw new Error(`${label} required`);
+  if (!HOME) throw new Error('HOME environment variable is not set');
+  const resolved = resolve(p);
+  if (resolved !== HOME && !resolved.startsWith(HOME + sep)) {
+    throw new Error(`${label} must be within your home directory`);
+  }
+  return resolved;
+}
+
+// Detect whether 'icp' or 'dfx' CLI is available
+// Prefer icp CLI (modern replacement), fall back to legacy dfx
+function detectCli() {
+  // Try icp CLI first — it's the official modern tool
+  const icpResult = spawnSync('icp', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+  if (icpResult.status === 0 && (icpResult.stdout || '').toLowerCase().includes('icp')) {
+    return 'icp';
+  }
+  // Fall back to legacy dfx
+  const dfxResult = spawnSync('dfx', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+  if (dfxResult.status === 0 && (dfxResult.stdout || '').toLowerCase().includes('dfx')) {
+    return 'dfx';
+  }
+  // Last resort fallbacks
+  if (icpResult.error === undefined) return 'icp';
+  if (dfxResult.error === undefined) return 'dfx';
+  return 'icp'; // default to modern CLI
+}
+
+let CLI = detectCli();
+
+// Map between dfx and icp CLI argument differences
+function networkArgs(network) {
+  if (!network || network === 'local') return [];
+  assertSafeName(network, 'network');
+  if (CLI === 'icp') return ['-e', network];
+  return ['--network', network];
+}
+
+// A project path used as a spawn cwd must also still exist. Recent-project
+// entries outlive the directories they point at (a project gets renamed,
+// archived, or moved), and spawning with a missing cwd fails with an empty
+// message — surfacing as `{"error":""}` rather than anything actionable.
+function assertProjectDir(p, label = 'Project path') {
+  const safe = assertSafePath(p, label);
+  if (!existsSync(safe)) throw new Error(`${label} no longer exists: ${safe}`);
+  return safe;
+}
+
+// Network args for identity- and ledger-scoped commands: `cycles mint`,
+// `cycles balance`, `token balance`, cycles-ledger calls. These differ from
+// networkArgs() in their fallback — with no network (or 'local') they still
+// target mainnet, because there is no local cycles ledger or ICP ledger to
+// read.
+//
+// The `-n` vs `-e` distinction is load-bearing. `icp` treats them as
+// conflicting flags: `-n` takes a *network* name, `-e` takes an *environment*
+// name. A project's environment declares which network it targets
+// (e.g. `- name: staging` with `network: ic`), so passing an
+// environment name to `-n` fails with "project does not contain a network
+// named 'staging'". Resolving an environment requires the project's icp.yaml,
+// so every caller passing a custom environment must also run the command with
+// that project as cwd.
+//
+// 'ic' is passed as a network name so these commands still work with no
+// project directory at all.
+function ledgerNetworkArgs(network) {
+  // Validate before the value can reach an argv slot — an unchecked name like
+  // '--help' would be read as a flag rather than a network.
+  if (network && network !== 'local') assertSafeName(network, 'network');
+  if (CLI !== 'icp') return network && network !== 'local' ? ['--network', network] : [];
+  if (!network || network === 'local' || network === 'ic') return ['-n', 'ic'];
+  return ['-e', network];
+}
+
+// ---------- helpers ----------
+
+// Get canister ID — dfx uses 'canister id', icp CLI uses 'canister status --id-only'
+function getCanisterId(canister, netArgs, cwd) {
+  if (CLI === 'icp') {
+    return runCliSync(['canister', 'status', canister, '--id-only', ...netArgs], cwd);
+  }
+  return runCliSync(['canister', 'id', canister, ...netArgs], cwd);
+}
+
+// Async sibling of getCanisterId — for batch endpoints that must not block the event loop.
+function getCanisterIdAsync(canister, netArgs, cwd) {
+  if (CLI === 'icp') {
+    return runCliAsync(['canister', 'status', canister, '--id-only', ...netArgs], cwd);
+  }
+  return runCliAsync(['canister', 'id', canister, ...netArgs], cwd);
+}
+
+// Secure: uses spawnSync with argument arrays — no shell interpolation
+// If the CLI binary has gone missing (ENOENT) — e.g. the user switched/installed
+// a CLI after startup — re-detect once and retry, so a server restart isn't needed.
+function runCliSync(args, cwd, _retried = false) {
+  try {
+    const result = spawnSync(CLI, args, {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 30000,
+      env: { ...process.env, HOME, PWD: cwd || process.cwd() },
+    });
+    if (result.error && result.error.code === 'ENOENT' && !_retried) {
+      CLI = detectCli();
+      return runCliSync(args, cwd, true);
+    }
+    if (result.status === 0) {
+      return { ok: true, data: (result.stdout || '').trim() };
+    }
+    return { ok: false, data: (result.stderr || result.stdout || '').trim() };
+  } catch (e) {
+    return { ok: false, data: e.message };
+  }
+}
+
+// Async sibling of runCliSync — uses spawn so it doesn't block the event loop.
+// Same { ok, data } shape and same 30s timeout (kills the child on timeout).
+// On spawn error (e.g. ENOENT) re-detects the CLI once and retries; never rejects.
+function runCliAsync(args, cwd, _retried = false) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(CLI, args, {
+        cwd,
+        env: { ...process.env, HOME, PWD: cwd || process.cwd() },
+      });
+    } catch (e) {
+      resolve({ ok: false, data: e.message });
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      try { child.kill('SIGTERM'); } catch (_) {}
+    }, 30000);
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('error', (err) => {
+      if (err.code === 'ENOENT' && !_retried) {
+        // CLI binary missing — re-detect once and retry.
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          CLI = detectCli();
+          runCliAsync(args, cwd, true).then(resolve);
+        }
+        return;
+      }
+      finish({ ok: false, data: err.message });
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        finish({ ok: true, data: stdout.trim() });
+      } else {
+        finish({ ok: false, data: (stderr || stdout).trim() });
+      }
+    });
+  });
+}
+
+// Run an async mapper over items with a bounded concurrency limit (no deps).
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+// ---------- Deploy history ----------
+
+const DEPLOY_HISTORY_FILE = '.deploy-history.json';
+
+function readDeployHistory(projectPath) {
+  const histPath = join(projectPath, DEPLOY_HISTORY_FILE);
+  if (!existsSync(histPath)) return [];
+  try {
+    const data = JSON.parse(readFileSync(histPath, 'utf-8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordDeploy(projectPath, { canister, network, moduleHash, deployMode }) {
+  // Get git info from the project
+  const gitCommitResult = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
+  });
+  const gitBranchResult = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
+  });
+  const gitDirtyResult = spawnSync('git', ['status', '--porcelain'], {
+    cwd: projectPath, encoding: 'utf-8', timeout: 5000,
+  });
+
+  const entry = {
+    canister,
+    network,
+    moduleHash: moduleHash || null,
+    gitCommit: gitCommitResult.status === 0 ? gitCommitResult.stdout.trim() : null,
+    gitBranch: gitBranchResult.status === 0 ? gitBranchResult.stdout.trim() : null,
+    gitDirty: gitDirtyResult.status === 0 ? gitDirtyResult.stdout.trim().length > 0 : null,
+    timestamp: new Date().toISOString(),
+    deployMode: deployMode || 'auto',
+  };
+
+  let history = readDeployHistory(projectPath);
+  history.push(entry);
+  if (history.length > 500) history = history.slice(-500); // cap at 500 entries
+  try {
+    writeFileSync(join(projectPath, DEPLOY_HISTORY_FILE), JSON.stringify(history, null, 2));
+  } catch {
+    // Non-fatal — don't break deploy if history write fails
+  }
+  return entry;
+}
+
+// ---------- Top-up history ----------
+
+const TOPUP_HISTORY_FILE = '.topup-history.json';
+
+// ---------- Auto cycles top-up ----------
+
+const AUTOTOPUP_FILE = '.autotopup.json';
+const DEFAULT_THRESHOLD = 1_000_000_000_000n; // 1T cycles
+const DEFAULT_TARGET = 2_000_000_000_000n;    // 2T cycles
+const MONITOR_INTERVAL_MS = 5 * 60 * 1000;    // 5 minutes
+const DEFAULT_COOLDOWN_MIN = 30;
+
+// Read/write the per-project .autotopup.json. Tolerate missing/corrupt file — return {}.
+function readAutoTopup(projectPath) {
+  const p = join(projectPath, AUTOTOPUP_FILE);
+  if (!existsSync(p)) return {};
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf-8'));
+    return (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAutoTopup(projectPath, data) {
+  try {
+    writeFileSync(join(projectPath, AUTOTOPUP_FILE), JSON.stringify(data, null, 2));
+  } catch {
+    // Non-fatal
+  }
+}
+
+// Parse a persisted positive-integer string into BigInt; null on anything malformed
+// so BigInt() can never throw on corrupt persisted data.
+function safeBigInt(value) {
+  if (value == null) return null;
+  const s = String(value);
+  if (!/^[0-9]+$/.test(s)) return null;
+  try { return BigInt(s); } catch { return null; }
+}
+
+function readTopupHistory(projectPath) {
+  const histPath = join(projectPath, TOPUP_HISTORY_FILE);
+  if (!existsSync(histPath)) return [];
+  try {
+    const data = JSON.parse(readFileSync(histPath, 'utf-8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordTopup(projectPath, { canister, network, amount, success, output, source }) {
+  const entry = {
+    canister,
+    network,
+    amount: String(amount),
+    success,
+    output: output || '',
+    source: source || 'cycles',
+    timestamp: new Date().toISOString(),
+  };
+
+  let history = readTopupHistory(projectPath);
+  history.push(entry);
+  if (history.length > 500) history = history.slice(-500);
+  try {
+    writeFileSync(join(projectPath, TOPUP_HISTORY_FILE), JSON.stringify(history, null, 2));
+  } catch {
+    // Non-fatal
+  }
+  return entry;
+}
+
+// Look up a module hash in deploy history to find version info
+function lookupVersion(history, canister, network, moduleHash) {
+  if (!moduleHash || !history.length) return null;
+  // Search backwards (most recent first) for a matching entry
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i];
+    if (e.canister === canister && e.network === network && e.moduleHash === moduleHash) {
+      return e;
+    }
+  }
+  return null;
+}
+
+// ---------- REST endpoints ----------
+
+// Which CLI are we using?
+app.get('/api/cli', (_req, res) => {
+  const versionResult = runCliSync(['--version']);
+  res.json({ cli: CLI, version: versionResult.ok ? versionResult.data : 'unknown' });
+});
+
+// List identities
+app.get('/api/identities', (_req, res) => {
+  // icp CLI: 'identity default' (no arg) returns current identity name
+  // dfx: 'identity whoami' returns current identity name
+  const whoamiCmd = CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami'];
+  const currentResult = runCliSync(whoamiCmd);
+  const currentIdentity = currentResult.ok ? currentResult.data : '';
+
+  const result = runCliSync(['identity', 'list']);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+
+  const lines = result.data.split('\n').filter((l) => l.trim());
+  const identities = lines.map((line) => {
+    if (CLI === 'icp') {
+      // icp format: "  name   principal" or "* name   principal"
+      const isActive = line.startsWith('*');
+      const parts = line.replace(/^\*?\s+/, '').split(/\s+/);
+      const name = parts[0];
+      return { name, active: isActive };
+    } else {
+      // dfx format: "name" or "name *" for active
+      const isActive = line.includes('*');
+      const name = line.replace(/\s*\*/, '').trim();
+      return { name, active: isActive || name === currentIdentity };
+    }
+  });
+  res.json(identities);
+});
+
+// Get current identity
+app.get('/api/identity/current', (_req, res) => {
+  // icp CLI: 'identity default' (no arg) = whoami
+  const cmd = CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami'];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ identity: result.data });
+});
+
+// Switch identity
+app.post('/api/identity/use', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  // icp CLI uses 'identity default' instead of 'identity use'
+  const cmd = CLI === 'icp' ? ['identity', 'default', name] : ['identity', 'use', name];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, identity: name });
+});
+
+// Create new identity
+app.post('/api/identity/new', (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = CLI === 'icp'
+    ? ['identity', 'new', name, '--storage', 'plaintext']
+    : ['identity', 'new', name, '--storage-mode', 'plaintext'];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, name, seed: result.data });
+});
+
+// Rename identity
+app.post('/api/identity/rename', (req, res) => {
+  const { oldName, newName } = req.body;
+  if (!oldName || !newName) return res.status(400).json({ error: 'oldName and newName required' });
+  try {
+    assertSafeName(oldName, 'identity name');
+    assertSafeName(newName, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = ['identity', 'rename', oldName, newName];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, oldName, newName });
+});
+
+// Export identity PEM — rate limited (sensitive: exposes private key)
+app.post('/api/identity/export', rateLimit(60000, 3), (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const cmd = ['identity', 'export', name];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({ ok: true, pem: result.data });
+});
+
+// Import identity from PEM
+app.post('/api/identity/import', (req, res) => {
+  const { name, pem } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!pem) return res.status(400).json({ error: 'pem required' });
+  if (!pem.includes('-----BEGIN') || !pem.includes('-----END')) {
+    return res.status(400).json({ error: 'Invalid PEM format' });
+  }
+  if (pem.length > 10000) {
+    return res.status(400).json({ error: 'PEM data too large' });
+  }
+  try {
+    assertSafeName(name, 'identity name');
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  // Write PEM to temp file, import, then delete
+  const tmpFile = join(tmpdir(), `icp-import-${randomUUID()}.pem`);
+  try {
+    writeFileSync(tmpFile, pem);
+    const cmd = CLI === 'icp'
+      ? ['identity', 'import', name, '--from-pem', tmpFile, '--storage', 'plaintext']
+      : ['identity', 'import', name, tmpFile, '--storage-mode', 'plaintext'];
+    const result = runCliSync(cmd);
+    if (!result.ok) return res.status(500).json({ error: result.data });
+    res.json({ ok: true, name });
+  } finally {
+    try { unlinkSync(tmpFile); } catch (_) {}
+  }
+});
+
+// Get principal for current identity
+app.get('/api/identity/principal', (_req, res) => {
+  const cmd = CLI === 'icp' ? ['identity', 'principal'] : ['identity', 'get-principal'];
+  const result = runCliSync(cmd);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ principal: result.data });
+});
+
+// Parse a project's dfx.json or icp.yaml into { canisters, networks, ... }.
+// Throws if neither config exists or parsing fails — callers map that to HTTP.
+function parseProjectConfig(projectPath) {
+  const dfxPath = join(projectPath, 'dfx.json');
+  const icpYamlPath = join(projectPath, 'icp.yaml');
+  const hasDfxJson = existsSync(dfxPath);
+  const hasIcpYaml = existsSync(icpYamlPath);
+
+  if (!hasDfxJson && !hasIcpYaml) {
+    throw new Error('No icp.yaml or dfx.json found in that folder');
+  }
+
+  // Prefer icp.yaml when both exist (modern ICP CLI format)
+  if (hasIcpYaml) {
+      // icp.yaml parsing: line-based parser for canisters array and environments
+      const yamlContent = readFileSync(icpYamlPath, 'utf-8');
+      const canisters = [];
+      const environments = [];
+      let currentCanister = null;
+      let currentEnv = null;
+      let section = null; // 'canisters' | 'environments' | null
+
+      for (const line of yamlContent.split('\n')) {
+        // Detect top-level sections
+        if (/^canisters:/.test(line)) { section = 'canisters'; continue; }
+        if (/^environments:/.test(line) || /^networks:/.test(line)) { section = 'environments'; continue; }
+        if (/^\S/.test(line) && !line.startsWith('#')) { section = null; continue; }
+
+        if (section === 'canisters') {
+          // Inline definition: "- name: foo"
+          const nameMatch = line.match(/^\s+-\s+name:\s*(.+)/);
+          if (nameMatch) {
+            if (currentCanister) canisters.push(currentCanister);
+            currentCanister = { name: nameMatch[1].trim().replace(/^["']|["']$/g, ''), type: 'unknown', main: null, source: null, dependencies: [] };
+          }
+          // Directory reference: "- backend/blob-storage" (no "name:" key — points to a subdirectory with canister.yaml)
+          if (!nameMatch) {
+            const dirRefMatch = line.match(/^\s+-\s+([^\s:][^\s]*)\s*$/);
+            if (dirRefMatch) {
+              if (currentCanister) canisters.push(currentCanister);
+              const dirRef = dirRefMatch[1].trim().replace(/^["']|["']$/g, '');
+              currentCanister = { name: dirRef.split('/').pop(), type: 'unknown', main: null, source: dirRef, dependencies: [], dirRef };
+              // Try to read canister.yaml from the referenced directory for more details
+              const canisterYamlPath = join(projectPath, dirRef, 'canister.yaml');
+              if (existsSync(canisterYamlPath)) {
+                try {
+                  const cyaml = readFileSync(canisterYamlPath, 'utf-8');
+                  const cn = cyaml.match(/^name:\s*(.+)/m);
+                  if (cn) currentCanister.name = cn[1].trim().replace(/^["']|["']$/g, '');
+                  // Detect type from recipe or build steps
+                  const recipeType = cyaml.match(/recipe:\s*\n\s+type:\s*["']?(@?[^"'\s]+)/);
+                  if (recipeType) {
+                    const t = recipeType[1];
+                    if (t.includes('rust')) currentCanister.type = 'rust';
+                    else if (t.includes('motoko')) currentCanister.type = 'motoko';
+                    else if (t.includes('asset')) currentCanister.type = 'assets';
+                    else currentCanister.type = t;
+                  }
+                  if (/type:\s*pre-built/.test(cyaml)) { currentCanister.isPrebuilt = true; currentCanister.type = 'pre-built'; }
+                  if (/type:\s*script/.test(cyaml) && !recipeType) currentCanister.type = 'custom';
+                  const mainM = cyaml.match(/^\s+main:\s*(.+)/m);
+                  if (mainM) currentCanister.main = mainM[1].trim().replace(/^["']|["']$/g, '');
+                } catch { /* canister.yaml unreadable, use defaults */ }
+              }
+            }
+          }
+          if (currentCanister) {
+            const typeMatch = line.match(/^\s+type:\s*["']?(@?[^"'\s]+)/);
+            if (typeMatch) {
+              const t = typeMatch[1];
+              if (t.includes('rust')) currentCanister.type = 'rust';
+              else if (t.includes('motoko')) currentCanister.type = 'motoko';
+              else if (t.includes('asset')) currentCanister.type = 'assets';
+              else if (t.includes('pre-built') || t.includes('prebuilt')) { currentCanister.type = 'custom'; currentCanister.isPrebuilt = true; }
+              else currentCanister.type = t;
+            }
+            // Detect pre-built canisters defined via build.steps (not recipe)
+            if (/^\s+-?\s*type:\s*pre-built/.test(line)) { currentCanister.isPrebuilt = true; currentCanister.type = 'pre-built'; }
+            const mainMatch = line.match(/^\s+main:\s*(.+)/);
+            if (mainMatch) currentCanister.main = mainMatch[1].trim().replace(/^["']|["']$/g, '');
+            const dirMatch = line.match(/^\s+dir:\s*(.+)/);
+            if (dirMatch) currentCanister.source = dirMatch[1].trim().replace(/^["']|["']$/g, '');
+            const packageMatch = line.match(/^\s+package:\s*(.+)/);
+            if (packageMatch) currentCanister.source = packageMatch[1].trim().replace(/^["']|["']$/g, '');
+          }
+        }
+
+        if (section === 'environments') {
+          const envNameMatch = line.match(/^\s+-\s+name:\s*(.+)/);
+          if (envNameMatch) {
+            if (currentEnv) environments.push(currentEnv);
+            currentEnv = { name: envNameMatch[1].trim().replace(/^["']|["']$/g, ''), network: null };
+          }
+          if (currentEnv) {
+            const netMatch = line.match(/^\s+network:\s*(.+)/);
+            if (netMatch) currentEnv.network = netMatch[1].trim().replace(/^["']|["']$/g, '');
+          }
+        }
+      }
+      if (currentCanister) canisters.push(currentCanister);
+      if (currentEnv) environments.push(currentEnv);
+
+      // Build network list from environments — icp CLI uses environments instead of networks
+      // Always include 'local' and 'ic' (implicit environments)
+      const networkSet = new Set(['local', 'ic']);
+      for (const env of environments) {
+        networkSet.add(env.name);
+      }
+      return { canisters, networks: [...networkSet], environments, raw: yamlContent, configType: 'icp.yaml' };
+    } else {
+      // Legacy dfx.json parsing
+      const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
+      const canisters = Object.entries(dfxJson.canisters || {}).map(
+        ([name, config]) => ({
+          name,
+          type: config.type || 'unknown',
+          main: config.main || null,
+          source: config.source ? config.source[0] : null,
+          dependencies: config.dependencies || [],
+          remote: config.remote || null,
+          pullType: config.type === 'pull' ? true : false,
+        })
+      );
+      // Collect networks from dfx.json config + canister_ids.json
+      const networkSet = new Set(Object.keys(dfxJson.networks || {}));
+      const canisterIds = readCanisterIds(projectPath);
+      for (const canisterEntry of Object.values(canisterIds)) {
+        if (canisterEntry && typeof canisterEntry === 'object') {
+          for (const netKey of Object.keys(canisterEntry)) {
+            networkSet.add(netKey);
+          }
+        }
+      }
+      networkSet.add('local');
+      const networks = [...networkSet];
+      return { canisters, networks, raw: dfxJson, configType: 'dfx.json' };
+    }
+}
+
+// Read dfx.json or icp.yaml from a project folder
+app.post('/api/project/info', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  if (!existsSync(join(projectPath, 'dfx.json')) && !existsSync(join(projectPath, 'icp.yaml'))) {
+    return res.status(404).json({ error: 'No icp.yaml or dfx.json found in that folder' });
+  }
+
+  try {
+    res.json(parseProjectConfig(projectPath));
+  } catch (e) {
+    res.status(500).json({ error: `Failed to parse project config: ${e.message}` });
+  }
+});
+
+// Add or remove an environment/network in icp.yaml or dfx.json
+app.post('/api/project/network', (req, res) => {
+  const { path: projectPath, action, name, config } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  if (!name) return res.status(400).json({ error: 'network name required' });
+  try { assertSafeName(name, 'network name'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (name === 'local') return res.status(400).json({ error: 'Cannot modify the local environment' });
+
+  const icpYamlPath = join(projectPath, 'icp.yaml');
+  const dfxPath = join(projectPath, 'dfx.json');
+  const hasIcpYaml = existsSync(icpYamlPath);
+  const hasDfxJson = existsSync(dfxPath);
+
+  if (!hasIcpYaml && !hasDfxJson) return res.status(404).json({ error: 'No icp.yaml or dfx.json found' });
+
+  try {
+    if (hasIcpYaml) {
+      // icp.yaml: manage environments section
+      let yamlContent = readFileSync(icpYamlPath, 'utf-8');
+
+      if (action === 'add') {
+        // Check if environment already exists
+        if (new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*$`, 'm').test(yamlContent)) {
+          return res.status(409).json({ error: `Environment "${name}" already exists` });
+        }
+        // Append environment to the environments section, or create it
+        const envBlock = `  - name: ${name}\n    network: ic\n`;
+        if (/^environments:/m.test(yamlContent)) {
+          yamlContent = yamlContent.replace(/^(environments:)/m, `$1\n${envBlock}`);
+        } else {
+          yamlContent += `\nenvironments:\n${envBlock}`;
+        }
+      } else if (action === 'remove') {
+        if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) environment' });
+        // Remove the environment entry (name line + following indented lines until next - name: or section)
+        const envRegex = new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*\\n(?:\\s{4,}\\S[^\\n]*\\n)*`, 'gm');
+        const newContent = yamlContent.replace(envRegex, '');
+        if (newContent === yamlContent) return res.status(404).json({ error: `Environment "${name}" not found` });
+        yamlContent = newContent;
+      } else {
+        return res.status(400).json({ error: 'action must be "add" or "remove"' });
+      }
+
+      writeFileSync(icpYamlPath, yamlContent);
+      // Re-parse to return updated network list
+      const networkSet = new Set(['local', 'ic']);
+      const envMatches = yamlContent.matchAll(/^\s+-\s+name:\s*(.+)/gm);
+      for (const m of envMatches) networkSet.add(m[1].trim().replace(/^["']|["']$/g, ''));
+      res.json({ ok: true, networks: [...networkSet] });
+    } else {
+      // Legacy dfx.json: manage networks section
+      const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
+      if (!dfxJson.networks) dfxJson.networks = {};
+
+      if (action === 'add') {
+        if (dfxJson.networks[name]) return res.status(409).json({ error: `Network "${name}" already exists` });
+        dfxJson.networks[name] = config || {
+          providers: ['https://icp-api.io'],
+          type: 'persistent',
+        };
+      } else if (action === 'remove') {
+        if (!dfxJson.networks[name]) return res.status(404).json({ error: `Network "${name}" not found` });
+        if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) network' });
+        delete dfxJson.networks[name];
+      } else {
+        return res.status(400).json({ error: 'action must be "add" or "remove"' });
+      }
+
+      writeFileSync(dfxPath, JSON.stringify(dfxJson, null, 2) + '\n');
+      const networkSet = new Set(Object.keys(dfxJson.networks));
+      const canisterIds = readCanisterIds(projectPath);
+      for (const entry of Object.values(canisterIds)) {
+        if (entry && typeof entry === 'object') {
+          for (const k of Object.keys(entry)) networkSet.add(k);
+        }
+      }
+      networkSet.add('local');
+      res.json({ ok: true, networks: [...networkSet] });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Parse full canister status output into structured data
+function parseCanisterStatus(raw) {
+  const parsed = {};
+
+  const statusMatch = raw.match(/Status:\s*(\w+)/i);
+  parsed.runningStatus = statusMatch ? statusMatch[1] : 'unknown';
+
+  // dfx: "Balance: 72_702_614_651 Cycles" — icp CLI: "Cycles: 72_702_614_651"
+  const cyclesMatch = raw.match(/(?:Balance:\s*([\d_,]+)\s*Cycles|Cycles:\s*([\d_,]+))/i);
+  parsed.cycles = cyclesMatch ? (cyclesMatch[1] || cyclesMatch[2]).replace(/[_,]/g, '') : null;
+
+  // dfx: "Memory Size: ..." — icp CLI: "Memory size: ..." (not "Memory allocation")
+  const memoryMatch = raw.match(/Memory\s*[Ss]ize:\s*([\d_,]+)/i);
+  parsed.memoryBytes = memoryMatch ? memoryMatch[1].replace(/[_,]/g, '') : null;
+
+  const moduleMatch = raw.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+  parsed.moduleHash = moduleMatch ? moduleMatch[1] : null;
+
+  const freezingMatch = raw.match(/Freezing threshold:\s*([\d_,]+)/i);
+  parsed.freezingThreshold = freezingMatch ? freezingMatch[1].replace(/[_,]/g, '') : null;
+
+  const controllersMatch = raw.match(/Controllers?:\s*(.+)/i);
+  parsed.controllers = controllersMatch
+    ? controllersMatch[1].split(/\s+/).filter(Boolean).map(c => c.replace(/,+$/, ''))
+    : [];
+
+  // icp CLI extras: idle burn rate, reserved cycles
+  const idleBurnMatch = raw.match(/Idle cycles burned per day:\s*([\d_,]+)/i);
+  parsed.idleBurnPerDay = idleBurnMatch ? idleBurnMatch[1].replace(/[_,]/g, '') : null;
+
+  parsed.raw = raw;
+  return parsed;
+}
+
+// Read canister_ids.json for a project (deployed IDs per network)
+function readCanisterIds(projectPath) {
+  const idsPath = join(projectPath, 'canister_ids.json');
+  if (!existsSync(idsPath)) return {};
+  try {
+    return JSON.parse(readFileSync(idsPath, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+// Get detailed canister status
+app.post('/api/canister/status', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const result = runCliSync(['canister', 'status', canister, ...netArgs], projectPath);
+  const idResult = getCanisterId(canister, netArgs, projectPath);
+
+  if (!result.ok) {
+    return res.json({
+      canister,
+      canisterId: idResult.ok ? idResult.data : null,
+      error: result.data,
+    });
+  }
+
+  const parsed = parseCanisterStatus(result.data);
+  res.json({
+    canister,
+    canisterId: idResult.ok ? idResult.data : null,
+    ...parsed,
+  });
+});
+
+// Batch fetch all canister statuses for a project
+app.post('/api/canisters/status-all', async (req, res) => {
+  const { path: projectPath, network, canisterNames } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const canisterIds = readCanisterIds(projectPath);
+  const results = {};
+
+  const names = (canisterNames || []).filter((name) => {
+    try { assertSafeName(name, 'canister'); return true; } catch { return false; }
+  });
+
+  await mapWithConcurrency(names, 4, async (name) => {
+    // Resolve the canister ID from canister_ids.json first; only fall back to the
+    // CLI (an extra spawn) when the file doesn't have it.
+    const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
+    let canisterId = idsJsonId;
+    if (!canisterId) {
+      const idResult = await getCanisterIdAsync(name, netArgs, projectPath);
+      canisterId = idResult.ok ? idResult.data : null;
+    }
+
+    const statusResult = await runCliAsync(['canister', 'status', name, ...netArgs], projectPath);
+
+    if (statusResult.ok) {
+      const parsed = parseCanisterStatus(statusResult.data);
+      results[name] = {
+        canister: name,
+        canisterId: canisterId || null,
+        ...parsed,
+      };
+    } else {
+      results[name] = {
+        canister: name,
+        canisterId: canisterId || null,
+        error: statusResult.data,
+      };
+    }
+  });
+
+  // Enrich with deploy history version info
+  const history = readDeployHistory(projectPath);
+  for (const name of Object.keys(results)) {
+    const r = results[name];
+    if (r.moduleHash && r.moduleHash !== 'None') {
+      r.version = lookupVersion(history, name, network, r.moduleHash) || null;
+    }
+  }
+
+  res.json(results);
+});
+
+// ---------- Fleet: identity-wide canister overview ----------
+
+// Mirror of the frontend's isRemoteForNetwork heuristic — canisters that are
+// externally owned / pulled on the given network are not part of the fleet.
+function isRemoteCanister(c, network) {
+  if (c.pullType) return true;
+  if (c.isPrebuilt && network !== 'local') return true;
+  if (c.type === 'unknown' && !c.isPrebuilt) return true;
+  if (c.remote && c.remote.id) {
+    if (c.remote.id[network]) return true;
+    if (network !== 'local' && c.remote.id.ic) return true;
+  }
+  return false;
+}
+
+// Which column of the Fleet page a canister belongs to. The default comes from
+// the network it is deployed on ('ic' => production, any custom environment =>
+// staging), because that is right for projects where staging is an environment
+// It is wrong for projects where staging is a canister inside the ic
+// environment (e.g. `frontend-staging`), so it is overridable per
+// canister. Overrides live in the panel's own settings — classification is a
+// dashboard view concern, and other projects' configs are not ours to write.
+function defaultFleetTier(network) {
+  return network === 'ic' ? 'production' : 'staging';
+}
+
+// Which real network an environment name resolves to. The name is NOT the
+// answer: `- name: staging` with `network: ic` under it is mainnet, and every
+// staging environment across these projects has so far been exactly that. The
+// fleet view uses this (never the environment name) to decide whether a row is
+// burning real cycles. Returns null when the environment is undeclared — a
+// network key that only exists in canister_ids.json, or a dfx.json network
+// whose provider we do not parse — because "unknown" and "not mainnet" are
+// different claims and collapsing them is what made the old count wrong.
+function resolveEnvNetwork(cfg, envName) {
+  if (envName === 'ic') return 'ic';
+  const env = (cfg?.environments || []).find((e) => e.name === envName);
+  return env?.network || null;
+}
+
+// The owner's classification if there is one, otherwise the panel's guess from
+// the network name. `tierSet` is the distinction the Fleet page needs to offer
+// "define the ones you have not defined": an explicit choice is ALWAYS stored,
+// even when it happens to equal the guess, so that "I confirmed this is
+// production" and "nobody has ever looked at this" are different states. They
+// were the same state until 2026-09-13, because the write path deleted any
+// override equal to the default.
+function fleetLedgerWatch(settings, projectPath, network, canisterName) {
+  return settings.fleetLedgerWatch?.[projectPath]?.[network]?.[canisterName] === true;
+}
+
+function fleetTierFor(settings, projectPath, network, canisterName) {
+  const o = settings.fleetTiers?.[projectPath]?.[network]?.[canisterName];
+  const set = o === 'production' || o === 'staging';
+  return { tier: set ? o : defaultFleetTier(network), tierSet: set };
+}
+
+// Aggregate every deployed canister across all recent projects, with cycles
+// balance, running status, controllers, auto top-up config, and Fleet tier.
+// `?network=all` (the default) walks every non-local network each project
+// declares; a specific name scans only that network. A successful
+// `canister status` on mainnet implies the current identity is a controller;
+// entries that error are returned with the error so the UI can show them as
+// inaccessible rather than silently dropping them.
+// The projects the Fleet page covers: the recent-projects list, minus any
+// outside $HOME or with no icp.yaml/dfx.json. Shared by /api/fleet and
+// /api/fleet/git-status so the two can never disagree about which projects
+// they describe.
+function fleetCandidateProjects(settings) {
+  const recent = Array.isArray(settings.recentProjects) ? settings.recentProjects : [];
+  const projects = [];
+  const skipped = [];
+  for (const p of recent) {
+    if (!p || !p.path) continue;
+    let safe;
+    try { safe = assertSafePath(p.path, 'Project path'); } catch { skipped.push({ path: p.path, reason: 'outside-home' }); continue; }
+    if (!existsSync(join(safe, 'icp.yaml')) && !existsSync(join(safe, 'dfx.json'))) {
+      skipped.push({ path: safe, reason: 'no-config' });
+      continue;
+    }
+    if (!projects.some((pr) => pr.path === safe)) {
+      projects.push({ path: safe, name: p.name || basename(safe) });
+    }
+  }
+  return { projects, skipped };
+}
+
+// Run git with an argument array (no shell). GIT_TERMINAL_PROMPT=0 makes a
+// remote that wants credentials fail at once instead of hanging the request on
+// a prompt nobody can see.
+function runGitAsync(args, cwd, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn('git', args, {
+        cwd,
+        env: { ...process.env, HOME, PWD: cwd, GIT_TERMINAL_PROMPT: '0' },
+      });
+    } catch (e) {
+      resolve({ ok: false, data: e.message });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } };
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch (_) {}
+      finish({ ok: false, data: `timed out after ${timeoutMs / 1000}s` });
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => finish({ ok: false, data: err.message }));
+    child.on('close', (code) => finish(code === 0
+      ? { ok: true, data: stdout.trim() }
+      : { ok: false, data: (stderr || stdout).trim() || `git exited ${code}` }));
+  });
+}
+
+// Is each Fleet project's local copy current with its remote? The scan reads
+// config and ID files from disk, so a clone that is behind silently hides every
+// environment and canister added upstream since it was last pulled. That is how
+// a project's staging canisters once went missing: the clone was hundreds of
+// commits behind and predated its own staging environment.
+//
+// It FETCHES first, because ahead/behind against a remote-tracking ref nobody
+// has refreshed is a claim about the last fetch, not about the remote. When the
+// fetch fails, `fetched` is false and the counts are reported as of the previous
+// fetch, never as "up to date". Fetch only moves remote-tracking refs; it never
+// touches the working tree or the checked-out branch.
+app.get('/api/fleet/git-status', async (req, res) => {
+  const { projects } = fleetCandidateProjects(readSettings());
+  const results = await mapWithConcurrency(projects, 4, async (proj) => {
+    const out = { path: proj.path, name: proj.name, repo: false, branch: null, upstream: null, fetched: false, fetchError: null, behind: null, ahead: null, dirty: null };
+    const inside = await runGitAsync(['rev-parse', '--is-inside-work-tree'], proj.path);
+    if (!inside.ok || inside.data !== 'true') return out;
+    out.repo = true;
+    const branch = await runGitAsync(['rev-parse', '--abbrev-ref', 'HEAD'], proj.path);
+    out.branch = branch.ok ? branch.data : null;
+    const upstream = await runGitAsync(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], proj.path);
+    const dirty = await runGitAsync(['status', '--porcelain'], proj.path);
+    out.dirty = dirty.ok ? (dirty.data ? dirty.data.split('\n').length : 0) : null;
+    if (!upstream.ok) return out; // no tracking branch: nothing to be behind
+    out.upstream = upstream.data;
+    const remote = out.upstream.split('/')[0];
+    const fetch = await runGitAsync(['fetch', '--quiet', remote], proj.path);
+    out.fetched = fetch.ok;
+    if (!fetch.ok) out.fetchError = fetch.data.split('\n').pop();
+    const counts = await runGitAsync(['rev-list', '--left-right', '--count', 'HEAD...@{u}'], proj.path);
+    if (counts.ok) {
+      const [ahead, behind] = counts.data.split(/\s+/).map(Number);
+      out.ahead = ahead;
+      out.behind = behind;
+    }
+    return out;
+  });
+  res.json({ checkedAt: new Date().toISOString(), projects: results });
+});
+
+app.get('/api/fleet', async (req, res) => {
+  const requested = req.query.network || 'all';
+  if (requested !== 'all') {
+    try { assertSafeName(requested, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    if (requested === 'local') return res.status(400).json({ error: 'Fleet view is for non-local networks' });
+    try { networkArgs(requested); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+
+  // Identity context
+  const identityResult = runCliSync(CLI === 'icp' ? ['identity', 'default'] : ['identity', 'whoami']);
+  const principalResult = runCliSync(CLI === 'icp' ? ['identity', 'principal'] : ['identity', 'get-principal']);
+  const identity = identityResult.ok ? identityResult.data : null;
+  const principal = principalResult.ok ? principalResult.data : null;
+
+  // Candidate projects = recent projects from settings
+  const settings = readSettings();
+  const { projects, skipped } = fleetCandidateProjects(settings);
+
+  // Parse every project once, collecting the non-local network union as we go.
+  // Sources: icp.yaml environments / dfx.json networks (via parseProjectConfig)
+  // plus the network keys already recorded in canister_ids.json — the latter
+  // catches an environment a project deployed to but no longer declares.
+  const parsed = [];
+  const networkSet = new Set(['ic']);
+  for (const proj of projects) {
+    let cfg;
+    try {
+      cfg = parseProjectConfig(proj.path);
+    } catch (e) {
+      skipped.push({ path: proj.path, reason: `parse-failed: ${e.message}` });
+      continue;
+    }
+    const ids = readCanisterIds(proj.path);
+    const nets = new Set(['ic']);
+    const addNet = (n) => {
+      if (!n || n === 'local') return;
+      try { assertSafeName(n, 'network'); } catch { return; }
+      nets.add(n);
+      networkSet.add(n);
+    };
+    for (const n of (cfg.networks || [])) addNet(n);
+    for (const rec of Object.values(ids)) {
+      if (rec && typeof rec === 'object') for (const n of Object.keys(rec)) addNet(n);
+    }
+    parsed.push({ proj, cfg, nets, ids, autoTopup: readAutoTopup(proj.path) });
+  }
+
+  // (project, canister, network) triples. Scanning every network at once is
+  // what makes the production/staging split possible: a canister deployed on
+  // 'ic' can be classified into staging, so the staging column needs ic rows.
+  // It is also cheap — most canisters exist on only one network, so the total
+  // status-call count is close to a single-network scan, not a multiple of it.
+  const pairs = [];
+  for (const { proj, cfg, nets, ids, autoTopup } of parsed) {
+    const targets = requested === 'all' ? [...nets] : (nets.has(requested) ? [requested] : []);
+    for (const net of targets) {
+      for (const c of (cfg.canisters || [])) {
+        try { assertSafeName(c.name, 'canister'); } catch { continue; }
+        if (isRemoteCanister(c, net)) continue;
+        pairs.push({ proj, canister: c, ids, autoTopup, network: net, networkResolved: resolveEnvNetwork(cfg, net) });
+      }
+    }
+  }
+
+  const entries = await mapWithConcurrency(pairs, 4, async ({ proj, canister, ids, autoTopup, network, networkResolved }) => {
+    const netArgs = networkArgs(network);
+    // Resolve the canister ID from canister_ids.json first; only fall back to
+    // the CLI (an extra spawn) when the file doesn't have it.
+    let canisterId = ids[canister.name]?.[network] || null;
+    let idLookup = null;
+    if (!canisterId) {
+      const idResult = await getCanisterIdAsync(canister.name, netArgs, proj.path);
+      canisterId = idResult.ok ? idResult.data.trim() : null;
+      if (!idResult.ok) idLookup = String(idResult.data || '').trim().split('\n').pop() || 'no output';
+    }
+    // No ID from either source. This used to return null and vanish, which made
+    // "never deployed here" and "deployed, but this copy of the project cannot
+    // see the ID" the same silent absence. Report it, with the CLI's own answer,
+    // and let the page say which projects are behind their remote.
+    if (!canisterId) {
+      return {
+        noId: true,
+        project: proj.path,
+        projectName: proj.name,
+        name: canister.name,
+        network,
+        networkResolved,
+        lookup: idLookup,
+      };
+    }
+
+    const entry = {
+      project: proj.path,
+      projectName: proj.name,
+      name: canister.name,
+      type: canister.type || 'unknown',
+      canisterId,
+      network,
+      networkResolved,
+      ...fleetTierFor(settings, proj.path, network, canister.name),
+      tierDefault: defaultFleetTier(network),
+      // Whether the owner asked for this row's ledger balance. The balance
+      // itself is NOT fetched here: it is read through
+      // /api/cycles/principal-balance, so there is one code path producing that
+      // number rather than a scan-time copy and an on-demand copy that could
+      // disagree.
+      ledgerWatch: fleetLedgerWatch(settings, proj.path, network, canister.name),
+      autoTopup: autoTopup?.[network]?.[canister.name] || null,
+    };
+
+    const statusResult = await runCliAsync(['canister', 'status', canister.name, ...netArgs], proj.path);
+    if (statusResult.ok) {
+      const parsed = parseCanisterStatus(statusResult.data);
+      delete parsed.raw; // keep the payload light — the UI never shows raw status text here
+      Object.assign(entry, parsed);
+      entry.isController = !!(principal && Array.isArray(parsed.controllers) && parsed.controllers.includes(principal));
+    } else {
+      entry.error = statusResult.data;
+    }
+    return entry;
+  });
+
+  // Dedupe by canister ID — the same canister can appear via multiple projects.
+  const seen = new Set();
+  const canisters = [];
+  const noId = [];
+  for (const e of entries) {
+    if (!e) continue;
+    if (e.noId) { delete e.noId; noId.push(e); continue; }
+    if (seen.has(e.canisterId)) continue;
+    seen.add(e.canisterId);
+    canisters.push(e);
+  }
+
+  res.json({ network: requested, availableNetworks: [...networkSet], identity, principal, projectsScanned: projects.length, skipped, canisters, noId });
+});
+
+// Apply one classification to the settings object in place. Returns the stored
+// result. An explicit 'production'/'staging' is always written, INCLUDING when
+// it equals the network-derived guess — that write is the whole record of the
+// owner having decided, and pruning it is what made a decided canister
+// indistinguishable from an untouched one. 'default' clears the record and
+// hands the row back to the guess.
+function applyFleetTier(settings, safePath, network, canister, tier) {
+  if (!settings.fleetTiers || typeof settings.fleetTiers !== 'object') settings.fleetTiers = {};
+  const byProject = settings.fleetTiers[safePath] || (settings.fleetTiers[safePath] = {});
+  const byNetwork = byProject[network] || (byProject[network] = {});
+
+  const fallback = defaultFleetTier(network);
+  const cleared = tier === 'default';
+  if (cleared) delete byNetwork[canister];
+  else byNetwork[canister] = tier;
+
+  // Prune emptied branches so the settings file doesn't accrete dead keys
+  if (Object.keys(byNetwork).length === 0) delete byProject[network];
+  if (Object.keys(byProject).length === 0) delete settings.fleetTiers[safePath];
+
+  return { canister, network, tier: cleared ? fallback : tier, tierSet: !cleared };
+}
+
+function validateTierRequest({ path: projectPath, canister, network, tier }) {
+  const safePath = assertSafePath(projectPath, 'Project path');
+  assertSafeName(canister, 'canister');
+  assertSafeName(network, 'network');
+  if (!['production', 'staging', 'default'].includes(tier)) {
+    throw new Error('tier must be "production", "staging", or "default"');
+  }
+  return { safePath, canister, network, tier };
+}
+
+// Classify one canister into the Fleet page's production or staging column.
+// This is the owner's label and nothing else: it never moves, redeploys, or
+// touches the canister, and it is stored in the panel's settings rather than in
+// the project's own config.
+app.post('/api/fleet/tier', (req, res) => {
+  let v;
+  try { v = validateTierRequest(req.body); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const settings = readSettings();
+  const result = applyFleetTier(settings, v.safePath, v.network, v.canister, v.tier);
+  writeSettings(settings);
+  res.json({ ok: true, ...result });
+});
+
+// Batch form of the above, for "classify every canister I have not classified"
+// in one click. All-or-nothing on validation: one bad item rejects the whole
+// request rather than leaving a half-applied classification the UI would then
+// disagree with. Bounded so a malformed client can't drive an unbounded write.
+app.post('/api/fleet/tiers', (req, res) => {
+  const items = req.body?.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array' });
+  }
+  if (items.length > 200) {
+    return res.status(400).json({ error: 'items must contain 200 or fewer entries' });
+  }
+
+  const validated = [];
+  for (const [i, item] of items.entries()) {
+    try { validated.push(validateTierRequest(item || {})); }
+    catch (e) { return res.status(400).json({ error: `items[${i}]: ${e.message}` }); }
+  }
+
+  const settings = readSettings();
+  const results = validated.map((v) => ({
+    project: v.safePath,
+    ...applyFleetTier(settings, v.safePath, v.network, v.canister, v.tier),
+  }));
+  writeSettings(settings);
+  res.json({ ok: true, applied: results.length, results });
+});
+
+// ---------- Canister lifecycle operations ----------
+
+// Stop a canister
+app.post('/api/canister/stop', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const result = runCliSync(['canister', 'stop', canister, ...networkArgs(network)], projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Start a canister
+app.post('/api/canister/start', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const result = runCliSync(['canister', 'start', canister, ...networkArgs(network)], projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Delete a canister — rate limited (destructive operation)
+app.post('/api/canister/delete', rateLimit(60000, 3), (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  // Must stop before deleting
+  runCliSync(['canister', 'stop', canister, ...networkArgs(network)], projectPath);
+  const result = runCliSync(['canister', 'delete', canister, ...networkArgs(network)], projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Update canister settings (e.g., freezing threshold)
+app.post('/api/canister/update-settings', (req, res) => {
+  const { path: projectPath, canister, network, freezingThreshold, addController, removeController } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const args = CLI === 'icp'
+    ? ['canister', 'settings', 'update', canister, ...networkArgs(network)]
+    : ['canister', 'update-settings', canister, ...networkArgs(network)];
+
+  if (freezingThreshold != null) {
+    const ft = String(parseInt(freezingThreshold, 10));
+    if (isNaN(parseInt(ft, 10))) return res.status(400).json({ error: 'Invalid freezing threshold' });
+    args.push('--freezing-threshold', ft);
+  }
+  if (addController) {
+    // Principal IDs contain alphanumeric chars and dashes
+    if (!/^[a-z0-9\-]+$/.test(addController)) {
+      return res.status(400).json({ error: 'Invalid controller principal' });
+    }
+    args.push('--add-controller', addController);
+  }
+  if (removeController) {
+    if (!/^[a-z0-9\-]+$/.test(removeController)) {
+      return res.status(400).json({ error: 'Invalid controller principal' });
+    }
+    args.push('--remove-controller', removeController);
+  }
+
+  const result = runCliSync(args, projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Core mint+top-up+record body, shared by the manual endpoint and the auto monitor.
+// When source starts with 'icp'/'auto-icp', mint `amount` cycles first (mainnet),
+// then run `canister top-up`. Records the attempt to topup-history tagged with `source`
+// so manual ('cycles'/'icp') and automatic ('auto-cycles'/'auto-icp') entries are
+// distinguishable. amount is bigint-safe — always shelled out via String(amount).
+async function performTopUp({ projectPath, canister, network, amount, source }) {
+  const needsMint = source === 'icp' || source === 'auto-icp';
+
+  // If funding from ICP, mint the cycles first.
+  if (needsMint) {
+    // Mint targets the requested network; minting is a mainnet operation, so when
+    // the network is local/unset we still default to 'ic'. Run it from the
+    // project directory so a custom environment name resolves against that
+    // project's icp.yaml — see ledgerNetworkArgs().
+    const mintNetArgs = ledgerNetworkArgs(network);
+    const mintCmd = CLI === 'icp'
+      ? ['cycles', 'mint', '--cycles', String(amount), ...mintNetArgs]
+      : ['ledger', 'fabricate-cycles', '--amount', String(amount)];
+    const mintResult = await runCliAsync(mintCmd, projectPath);
+    if (!mintResult.ok) {
+      if (projectPath) {
+        recordTopup(projectPath, { canister, network, amount, success: false, output: `Mint failed: ${mintResult.data}`, source });
+      }
+      return { ok: false, output: `Mint failed: ${mintResult.data}` };
+    }
+  }
+
+  // Top up from cycles balance.
+  const args = ['canister', 'top-up', canister, '--amount', String(amount), ...networkArgs(network)];
+  const result = await runCliAsync(args, projectPath);
+  if (projectPath) {
+    recordTopup(projectPath, { canister, network, amount, success: result.ok, output: result.data, source });
+  }
+  return { ok: result.ok, output: result.data };
+}
+
+// Top up a canister with cycles — rate limited (financial operation)
+app.post('/api/canister/top-up', rateLimit(60000, 5), async (req, res) => {
+  const { path: projectPath, canister, network, amount, source } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (network && network !== 'local') {
+    try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number of cycles' });
+  }
+
+  const result = await performTopUp({ projectPath, canister, network, amount, source: source || 'cycles' });
+  res.json({ ok: result.ok, output: result.output });
+});
+
+// Get top-up history for a project
+app.post('/api/topup-history', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  res.json(readTopupHistory(projectPath));
+});
+
+// ---------- Auto cycles top-up: helpers ----------
+
+// Current cycles balance of a canister via `canister status`. Returns BigInt or null
+// (asset canister with no cycles line, unreachable, or unparseable).
+async function getCanisterCyclesAsync(canister, netArgs, cwd) {
+  const result = await runCliAsync(['canister', 'status', canister, ...netArgs], cwd);
+  if (!result.ok) return null;
+  const parsed = parseCanisterStatus(result.data);
+  return safeBigInt(parsed.cycles);
+}
+
+// Cycles balance of the controlling identity (same command + regex as
+// GET /api/cycles/identity-balance). Returns BigInt or null.
+async function getControllerCyclesBalance(network, projectPath) {
+  const netArgs = ledgerNetworkArgs(network);
+  const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
+  const result = await runCliAsync(cmd, projectPath);
+  if (!result.ok) return null;
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  if (!match) return null;
+  return safeBigInt(match[1].replace(/[_,]/g, ''));
+}
+
+// ICP ledger balance of the controlling identity (same command + regex as
+// GET /api/ledger/balance). Returns Number or null.
+async function getControllerIcpBalance(network, projectPath) {
+  const netArgs = ledgerNetworkArgs(network);
+  const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
+  const result = await runCliAsync(cmd, projectPath);
+  if (!result.ok) return null;
+  const match = result.data.match(/([\d.]+)\s*ICP/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return isNaN(n) ? null : n;
+}
+
+// Register/dedupe a project in settings.autoTopupProjects so the monitor scans it.
+function registerAutoTopupProject(projectPath) {
+  const settings = readSettings();
+  const list = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+  if (!list.includes(projectPath)) {
+    list.push(projectPath);
+    settings.autoTopupProjects = list;
+    writeSettings(settings);
+  }
+}
+
+// Remove a project from autoTopupProjects when its .autotopup.json has no enabled
+// canister across any network (so the monitor stops scanning a project with nothing on).
+function pruneAutoTopupProject(projectPath) {
+  const data = readAutoTopup(projectPath);
+  let hasEnabled = false;
+  for (const network of Object.keys(data)) {
+    const canisters = data[network];
+    if (!canisters || typeof canisters !== 'object') continue;
+    for (const cfg of Object.values(canisters)) {
+      if (cfg && cfg.enabled) { hasEnabled = true; break; }
+    }
+    if (hasEnabled) break;
+  }
+  if (hasEnabled) return;
+  const settings = readSettings();
+  const list = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+  const filtered = list.filter(p => p !== projectPath);
+  if (filtered.length !== list.length) {
+    settings.autoTopupProjects = filtered;
+    writeSettings(settings);
+  }
+}
+
+// ---------- Auto cycles top-up: monitor ----------
+
+let monitorRunning = false;
+
+// Run one monitor pass. Returns an array of action records:
+//   { project, network, canister, action: 'topped-up'|'skipped', reason, amount? }
+// Never throws — one bad project can't abort the loop. All cycle math is BigInt.
+async function runAutoTopupPass() {
+  if (monitorRunning) return [];
+  monitorRunning = true;
+  const actions = [];
+  try {
+    const settings = readSettings();
+    if (settings.autoTopupEnabled === false) return actions;
+
+    const reserveCycles = safeBigInt(settings.autoTopupReserveCycles) ?? 0n;
+    const reserveIcp = Number(settings.autoTopupReserveIcp || 0) || 0;
+    const cooldownMin = settings.autoTopupCooldownMinutes ?? DEFAULT_COOLDOWN_MIN;
+    const cooldownMs = (Number(cooldownMin) || DEFAULT_COOLDOWN_MIN) * 60000;
+
+    const projects = Array.isArray(settings.autoTopupProjects) ? settings.autoTopupProjects : [];
+
+    for (const projectPath of projects) {
+      try {
+        if (!existsSync(join(projectPath, AUTOTOPUP_FILE))) continue;
+        const data = readAutoTopup(projectPath);
+
+        for (const network of Object.keys(data)) {
+          if (network === 'local') continue;
+          const canisters = data[network];
+          if (!canisters || typeof canisters !== 'object') continue;
+
+          for (const canister of Object.keys(canisters)) {
+            const cfg = canisters[canister];
+            if (!cfg || !cfg.enabled) continue;
+
+            const rec = (action, reason, amount) => {
+              const a = { project: projectPath, network, canister, action, reason };
+              if (amount !== undefined) a.amount = amount;
+              actions.push(a);
+            };
+
+            // Cooldown guard
+            const now = Date.now();
+            if (cfg.lastTopupAt) {
+              const last = Date.parse(cfg.lastTopupAt);
+              if (!isNaN(last) && now < last + cooldownMs) {
+                rec('skipped', 'cooldown');
+                continue;
+              }
+            }
+
+            // Daily cap guard
+            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+            const spent = (cfg.spent && cfg.spent.date === today) ? (safeBigInt(cfg.spent.cycles) ?? 0n) : 0n;
+            const cap = cfg.dailyCapCycles ? safeBigInt(cfg.dailyCapCycles) : null;
+            if (cap !== null && spent >= cap) {
+              rec('skipped', 'daily-cap-reached');
+              continue;
+            }
+
+            const threshold = safeBigInt(cfg.thresholdCycles) ?? DEFAULT_THRESHOLD;
+            const target = safeBigInt(cfg.targetCycles) ?? DEFAULT_TARGET;
+
+            // Current canister cycles
+            const cycles = await getCanisterCyclesAsync(canister, networkArgs(network), projectPath);
+            if (cycles === null) { rec('skipped', 'status-unavailable'); continue; }
+            if (cycles >= threshold) { rec('skipped', 'above-threshold'); continue; }
+
+            // Desired refill amount, bounded by remaining daily cap
+            let amount = target - cycles;
+            if (cap !== null) {
+              const remaining = cap - spent;
+              if (remaining < amount) amount = remaining;
+            }
+            if (amount <= 0n) { rec('skipped', 'cap-exhausted'); continue; }
+
+            // Available cycles from the controller, honouring the reserve floor
+            const cyclesBal = await getControllerCyclesBalance(network, projectPath);
+            const availCycles = cyclesBal == null
+              ? 0n
+              : (cyclesBal > reserveCycles ? cyclesBal - reserveCycles : 0n);
+
+            let r;
+            let spentNow;
+            if (availCycles >= amount) {
+              // Fully fundable from existing cycles
+              r = await performTopUp({ projectPath, canister, network, amount, source: 'auto-cycles' });
+              spentNow = amount;
+            } else {
+              // Cycles short — fall back to minting from ICP for the shortfall
+              const icpBal = await getControllerIcpBalance(network, projectPath);
+              if (icpBal != null && icpBal > reserveIcp) {
+                if (availCycles > 0n) {
+                  await performTopUp({ projectPath, canister, network, amount: availCycles, source: 'auto-cycles' });
+                }
+                r = await performTopUp({ projectPath, canister, network, amount: amount - availCycles, source: 'auto-icp' });
+                spentNow = amount;
+              } else {
+                rec('skipped', 'insufficient-funds (cycles short, ICP below reserve)');
+                continue;
+              }
+            }
+
+            if (r && r.ok) {
+              cfg.lastTopupAt = new Date().toISOString();
+              cfg.spent = { date: today, cycles: String(spent + spentNow) };
+              writeAutoTopup(projectPath, data);
+              rec('topped-up', 'below-threshold', String(spentNow));
+            } else {
+              // Do not update runtime state on failure.
+              rec('skipped', 'topup-failed: ' + (r ? r.output : 'unknown'));
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Auto top-up: error processing project ${projectPath}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error('Auto top-up pass error:', e.message);
+  } finally {
+    monitorRunning = false;
+  }
+  return actions;
+}
+
+function startAutoTopupMonitor() {
+  setInterval(() => {
+    runAutoTopupPass().catch((e) => console.error('Auto top-up interval error:', e.message));
+  }, MONITOR_INTERVAL_MS);
+}
+
+// ---------- Auto cycles top-up: endpoints ----------
+
+// Enable/disable and configure auto top-up for one canister.
+app.post('/api/autotopup/config', (req, res) => {
+  const { path: projectPath, network, canister, enabled, thresholdCycles, targetCycles, dailyCapCycles } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (network === 'local') return res.status(400).json({ error: 'Auto top-up is not available for the local network' });
+
+  const isPosInt = (v) => typeof v === 'string' && /^[0-9]+$/.test(v) && BigInt(v) > 0n;
+
+  // Validate optional override fields when present.
+  if (thresholdCycles !== undefined && !isPosInt(thresholdCycles)) {
+    return res.status(400).json({ error: 'thresholdCycles must be a positive integer string' });
+  }
+  if (targetCycles !== undefined && !isPosInt(targetCycles)) {
+    return res.status(400).json({ error: 'targetCycles must be a positive integer string' });
+  }
+  if (dailyCapCycles !== undefined && dailyCapCycles !== null && !isPosInt(dailyCapCycles)) {
+    return res.status(400).json({ error: 'dailyCapCycles must be a positive integer string or null' });
+  }
+
+  const data = readAutoTopup(projectPath);
+  if (!data[network] || typeof data[network] !== 'object') data[network] = {};
+  const existing = (data[network][canister] && typeof data[network][canister] === 'object') ? data[network][canister] : {};
+
+  // Resolve effective threshold/target (override → existing → default) so we can
+  // enforce threshold < target regardless of which were supplied this call.
+  const effThreshold = thresholdCycles !== undefined
+    ? thresholdCycles
+    : (existing.thresholdCycles ?? String(DEFAULT_THRESHOLD));
+  const effTarget = targetCycles !== undefined
+    ? targetCycles
+    : (existing.targetCycles ?? String(DEFAULT_TARGET));
+  if (BigInt(effThreshold) >= BigInt(effTarget)) {
+    return res.status(400).json({ error: 'thresholdCycles must be less than targetCycles' });
+  }
+
+  // Daily cap: explicit value or null; preserve existing if not supplied.
+  let effCap;
+  if (dailyCapCycles !== undefined) effCap = dailyCapCycles === null ? null : dailyCapCycles;
+  else effCap = existing.dailyCapCycles ?? null;
+
+  const merged = {
+    ...existing, // preserves runtime fields (lastTopupAt, spent)
+    enabled: !!enabled,
+    thresholdCycles: effThreshold,
+    targetCycles: effTarget,
+    dailyCapCycles: effCap,
+  };
+
+  data[network][canister] = merged;
+  writeAutoTopup(projectPath, data);
+
+  // Keep the project registry in sync with whether anything is enabled.
+  if (merged.enabled) registerAutoTopupProject(projectPath);
+  else pruneAutoTopupProject(projectPath);
+
+  res.json({ ok: true, config: merged });
+});
+
+// Return the whole .autotopup.json for a project plus the global settings.
+app.post('/api/autotopup/status', (req, res) => {
+  const { path: projectPath } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+  const settings = readSettings();
+  res.json({
+    config: readAutoTopup(projectPath),
+    global: {
+      autoTopupEnabled: settings.autoTopupEnabled !== false,
+      reserveCycles: settings.autoTopupReserveCycles ?? '0',
+      reserveIcp: settings.autoTopupReserveIcp ?? '0',
+      cooldownMinutes: settings.autoTopupCooldownMinutes ?? DEFAULT_COOLDOWN_MIN,
+    },
+  });
+});
+
+// Run one monitor pass immediately — rate limited (spends funds).
+app.post('/api/autotopup/run-now', rateLimit(60000, 10), async (_req, res) => {
+  const actions = await runAutoTopupPass();
+  res.json({ ok: true, actions });
+});
+
+// ---------- Canister snapshots ----------
+
+// List snapshots for a canister
+app.post('/api/canister/snapshots', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const result = runCliSync(['canister', 'snapshot', 'list', canister, ...networkArgs(network)], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+
+  // Parse snapshot list output: "ID: SIZE, taken at TIMESTAMP"
+  const snapshots = [];
+  for (const line of result.data.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Format: "0000000000000000800000000010000a0101: 2.39MiB, taken at 2024-09-16 19:40:23 UTC"
+    const match = trimmed.match(/^([0-9a-f]+):\s*([\d.]+\s*\S+),\s*taken at\s*(.+)$/i);
+    if (match) {
+      snapshots.push({ id: match[1], size: match[2], takenAt: match[3].trim() });
+    } else {
+      // Fallback: treat the whole line as an ID if it looks hex-like
+      const hexMatch = trimmed.match(/^([0-9a-f]{10,})/i);
+      if (hexMatch) snapshots.push({ id: hexMatch[1], size: null, takenAt: null, raw: trimmed });
+    }
+  }
+  res.json({ snapshots, raw: result.data });
+});
+
+// Create a snapshot (canister should be stopped first)
+app.post('/api/canister/snapshot/create', (req, res) => {
+  const { path: projectPath, canister, network, replace } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const args = ['canister', 'snapshot', 'create', canister, ...networkArgs(network)];
+  if (replace) {
+    if (!/^[0-9a-f]+$/i.test(replace)) return res.status(400).json({ error: 'Invalid snapshot ID' });
+    args.push('--replace', replace);
+  }
+  const result = runCliSync(args, projectPath);
+  if (!result.ok) return res.json({ ok: false, error: result.data });
+
+  // Try to extract snapshot ID from output
+  const idMatch = result.data.match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i);
+  res.json({ ok: true, snapshotId: idMatch ? idMatch[1] : null, output: result.data });
+});
+
+// Safe snapshot: stop → create snapshot → restart (if was running)
+app.post('/api/canister/snapshot/safe-create', (req, res) => {
+  const { path: projectPath, canister, network, replace } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const netArgs = networkArgs(network);
+
+  const steps = { stopped: false, snapshotCreated: false, restarted: false };
+  let wasRunning = false;
+
+  // 1. Check current status
+  const statusResult = runCliSync(['canister', 'status', canister, ...netArgs], projectPath);
+  if (statusResult.ok) {
+    wasRunning = /Status:\s*Running/i.test(statusResult.data);
+  }
+
+  // 2. Stop if running
+  if (wasRunning) {
+    const stopResult = runCliSync(['canister', 'stop', canister, ...netArgs], projectPath);
+    if (!stopResult.ok) {
+      return res.json({ ok: false, error: `Failed to stop canister: ${stopResult.data}`, steps });
+    }
+    steps.stopped = true;
+  }
+
+  // 3. Create snapshot
+  const snapArgs = ['canister', 'snapshot', 'create', canister, ...netArgs];
+  if (replace) {
+    if (!/^[0-9a-f]+$/i.test(replace)) {
+      // Restart before returning error
+      if (wasRunning) runCliSync(['canister', 'start', canister, ...netArgs], projectPath);
+      return res.status(400).json({ error: 'Invalid snapshot ID' });
+    }
+    snapArgs.push('--replace', replace);
+  }
+  const snapResult = runCliSync(snapArgs, projectPath);
+  const idMatch = snapResult.ok ? snapResult.data.match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i) : null;
+  steps.snapshotCreated = snapResult.ok;
+
+  // 4. Restart if was running (always attempt, even if snapshot failed)
+  if (wasRunning) {
+    const startResult = runCliSync(['canister', 'start', canister, ...netArgs], projectPath);
+    steps.restarted = startResult.ok;
+  }
+
+  if (!snapResult.ok) {
+    return res.json({ ok: false, error: `Snapshot failed: ${snapResult.data}`, steps });
+  }
+
+  res.json({
+    ok: true,
+    snapshotId: idMatch ? idMatch[1] : null,
+    output: snapResult.data,
+    steps,
+  });
+});
+
+// Load (restore) a snapshot
+app.post('/api/canister/snapshot/load', (req, res) => {
+  const { path: projectPath, canister, network, snapshotId } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!snapshotId || !/^[0-9a-f]+$/i.test(snapshotId)) return res.status(400).json({ error: 'Invalid snapshot ID' });
+
+  const result = runCliSync(['canister', 'snapshot', 'load', canister, snapshotId, ...networkArgs(network)], projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Delete a snapshot
+app.post('/api/canister/snapshot/delete', (req, res) => {
+  const { path: projectPath, canister, network, snapshotId } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!snapshotId || !/^[0-9a-f]+$/i.test(snapshotId)) return res.status(400).json({ error: 'Invalid snapshot ID' });
+
+  const result = runCliSync(['canister', 'snapshot', 'delete', canister, snapshotId, ...networkArgs(network)], projectPath);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Download a snapshot to local directory
+app.post('/api/canister/snapshot/download', (req, res) => {
+  const { path: projectPath, canister, network, snapshotId, dir } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!snapshotId || !/^[0-9a-f]+$/i.test(snapshotId)) return res.status(400).json({ error: 'Invalid snapshot ID' });
+  if (!dir) return res.status(400).json({ error: 'Directory path required' });
+  try { assertSafePath(dir, 'Snapshot directory'); } catch (e) { return res.status(403).json({ error: e.message }); }
+
+  const args = ['canister', 'snapshot', 'download', canister, snapshotId, '--dir', dir, ...networkArgs(network)];
+  // Downloading can take a long time for large canisters
+  const result = spawnSync(CLI, args, {
+    cwd: projectPath,
+    encoding: 'utf-8',
+    timeout: 300000, // 5 min
+    env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+  });
+
+  if (result.status === 0) {
+    res.json({ ok: true, output: (result.stdout || '').trim() });
+  } else {
+    res.json({ ok: false, error: (result.stderr || result.stdout || '').trim() });
+  }
+});
+
+// Upload a snapshot from local directory
+app.post('/api/canister/snapshot/upload', (req, res) => {
+  const { path: projectPath, canister, network, dir, replace } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!dir) return res.status(400).json({ error: 'Directory path required' });
+  try { assertSafePath(dir, 'Snapshot directory'); } catch (e) { return res.status(403).json({ error: e.message }); }
+
+  const args = ['canister', 'snapshot', 'upload', canister, '--dir', dir, ...networkArgs(network)];
+  if (replace && /^[0-9a-f]+$/i.test(replace)) {
+    args.push('--replace', replace);
+  }
+
+  const result = spawnSync(CLI, args, {
+    cwd: projectPath,
+    encoding: 'utf-8',
+    timeout: 300000,
+    env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+  });
+
+  if (result.status === 0) {
+    const idMatch = (result.stdout || '').match(/(?:Snapshot ID:\s*|Created snapshot\s+)([0-9a-f]+)/i);
+    res.json({ ok: true, snapshotId: idMatch ? idMatch[1] : null, output: (result.stdout || '').trim() });
+  } else {
+    res.json({ ok: false, error: (result.stderr || result.stdout || '').trim() });
+  }
+});
+
+// Get canister info (module hash, controllers — useful for data extraction view)
+app.post('/api/canister/info', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const result = runCliSync(['canister', 'info', canister, ...networkArgs(network)], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ ok: true, info: result.data });
+});
+
+// Read canister metadata (e.g. candid:service)
+app.post('/api/canister/metadata', (req, res) => {
+  const { path: projectPath, canister, network, metadataName } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!metadataName) return res.status(400).json({ error: 'Metadata name required' });
+  // Metadata names like "candid:service" contain a colon, validate loosely
+  if (!/^[a-zA-Z0-9_:\-]+$/.test(metadataName)) return res.status(400).json({ error: 'Invalid metadata name' });
+
+  const result = runCliSync(['canister', 'metadata', canister, metadataName, ...networkArgs(network)], projectPath);
+  if (!result.ok) return res.json({ ok: false, error: result.data });
+  res.json({ ok: true, data: result.data });
+});
+
+// ---------- Deployment readiness summary ----------
+
+app.post('/api/deploy/summary', async (req, res) => {
+  const { path: projectPath, network, canisterNames } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  let netArgs;
+  try { netArgs = networkArgs(network); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const summary = { canisters: {} };
+
+  // Per-canister: deployed module hash vs local WASM hash
+  const names = (canisterNames || []).filter((name) => {
+    try { assertSafeName(name, 'canister'); return true; } catch { return false; }
+  });
+  const canisterIds = readCanisterIds(projectPath);
+
+  await mapWithConcurrency(names, 4, async (name) => {
+    const entry = { deployed: false, canisterId: null, moduleHash: null, localWasm: null, status: null };
+
+    // Resolve canister ID from canister_ids.json first; only fall back to the CLI
+    // (an extra spawn) when the file doesn't have it.
+    const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
+    if (idsJsonId) {
+      entry.canisterId = idsJsonId;
+    } else {
+      const idResult = await getCanisterIdAsync(name, netArgs, projectPath);
+      entry.canisterId = idResult.ok ? idResult.data : null;
+    }
+
+    if (entry.canisterId) {
+      entry.deployed = true;
+
+      // Get deployed status + module hash from canister status (works for both icp and dfx)
+      const statusResult = await runCliAsync(['canister', 'status', name, ...netArgs], projectPath);
+      if (statusResult.ok) {
+        const statusMatch = statusResult.data.match(/Status:\s*(\w+)/i);
+        entry.status = statusMatch ? statusMatch[1] : null;
+        const hashMatch = statusResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+        entry.moduleHash = hashMatch ? hashMatch[1] : null;
+      }
+
+      // Fallback: try canister info (dfx only, icp CLI doesn't have this)
+      if (!entry.moduleHash && CLI !== 'icp') {
+        const infoResult = await runCliAsync(['canister', 'info', name, ...netArgs], projectPath);
+        if (infoResult.ok) {
+          const hashMatch = infoResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+          entry.moduleHash = hashMatch ? hashMatch[1] : null;
+        }
+      }
+    }
+
+    // Check if local WASM exists and compute hash for comparison.
+    // icp CLI: .icp/cache/artifacts/<name> is the final post-metadata WASM that matches chain.
+    //          .dfx/<net>/ contains the pre-metadata build output (hash won't match).
+    // dfx:     .dfx/<net>/canisters/<name>/<name>.wasm is the final artifact that matches chain.
+    const localNet = network === 'ic' ? 'ic' : 'local';
+    const dfxPaths = [
+      join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm`),
+      join(projectPath, '.dfx', localNet, 'canisters', name, `${name}.wasm.gz`),
+      join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm`),
+      join(projectPath, '.dfx', 'local', 'canisters', name, `${name}.wasm.gz`),
+    ];
+    const icpCachePath = join(projectPath, '.icp', 'cache', 'artifacts', name);
+    // icp CLI stores the final deployed artifact in .icp/cache/artifacts/ — check it first
+    const wasmCandidates = CLI === 'icp'
+      ? [icpCachePath, ...dfxPaths]
+      : [...dfxPaths, icpCachePath];
+    let localWasmPath = null;
+    for (const wp of wasmCandidates) {
+      if (existsSync(wp)) { localWasmPath = wp; break; }
+    }
+    if (localWasmPath) {
+      entry.localWasmExists = true;
+      try {
+        let wasmBytes = readFileSync(localWasmPath);
+        // Detect gzip by magic bytes (1f 8b) rather than file extension
+        const isGzip = wasmBytes[0] === 0x1f && wasmBytes[1] === 0x8b;
+        if (isGzip) {
+          wasmBytes = gunzipSync(wasmBytes);
+        }
+        const hash = createHash('sha256').update(wasmBytes).digest('hex');
+        entry.localWasmHash = '0x' + hash;
+      } catch { entry.localWasmHash = null; }
+    } else {
+      entry.localWasmExists = false;
+      entry.localWasmHash = null;
+    }
+
+    // Compare local vs deployed
+    if (entry.moduleHash && entry.localWasmHash) {
+      entry.hashMatch = entry.moduleHash === entry.localWasmHash;
+    } else {
+      entry.hashMatch = null; // can't determine
+    }
+
+    summary.canisters[name] = entry;
+  });
+
+  // Look up deploy history for version info
+  const history = readDeployHistory(projectPath);
+  for (const name of Object.keys(summary.canisters)) {
+    const c = summary.canisters[name];
+    if (c.moduleHash && c.moduleHash !== 'None') {
+      const versionInfo = lookupVersion(history, name, network, c.moduleHash);
+      c.version = versionInfo || null;
+    } else {
+      c.version = null;
+    }
+  }
+
+  // Write resolved canister IDs back to canister_ids.json so other machines (and CLI fallback)
+  // can resolve them after a git pull, without needing local CLI state.
+  try {
+    const idsPath = join(projectPath, 'canister_ids.json');
+    const existingIds = readCanisterIds(projectPath);
+    let changed = false;
+    for (const [name, entry] of Object.entries(summary.canisters)) {
+      if (entry.canisterId) {
+        if (!existingIds[name]) existingIds[name] = {};
+        if (existingIds[name][network] !== entry.canisterId) {
+          existingIds[name][network] = entry.canisterId;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      writeFileSync(idsPath, JSON.stringify(existingIds, null, 2) + '\n', 'utf-8');
+    }
+  } catch { /* non-fatal — best effort */ }
+
+  res.json(summary);
+});
+
+// Build canisters before deploy
+app.post('/api/build', (req, res) => {
+  const { path: projectPath, canisterNames } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  const args = ['build'];
+  if (canisterNames && canisterNames.length > 0) {
+    for (const name of canisterNames) {
+      try { assertSafeName(name, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+    }
+    args.push(...canisterNames);
+  }
+
+  // Build can take a while
+  const result = spawnSync(CLI, args, {
+    cwd: projectPath,
+    encoding: 'utf-8',
+    timeout: 300000, // 5 min
+    env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+  });
+
+  if (result.status === 0) {
+    res.json({ ok: true, output: (result.stdout || '').trim() + '\n' + (result.stderr || '').trim() });
+  } else {
+    res.json({ ok: false, error: (result.stderr || result.stdout || '').trim() });
+  }
+});
+
+// Get ICP ledger balance for current identity
+app.get('/api/ledger/balance', (req, res) => {
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  // Optional `path`: required only to resolve a custom environment name, which
+  // lives in that project's icp.yaml. Omit it for 'ic'/local.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  const netArgs = ledgerNetworkArgs(network);
+  const cmd = CLI === 'icp' ? ['token', 'balance', ...netArgs] : ['ledger', 'balance', ...netArgs];
+  const result = runCliSync(cmd, projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // Output format: "Balance: 12.34567890 ICP" or just a number
+  const match = result.data.match(/([\d.]+)\s*ICP/i);
+  const balance = match ? match[1] : result.data.trim();
+  res.json({ balance, raw: result.data });
+});
+
+// Get cycles balance for current identity
+app.get('/api/cycles/identity-balance', (req, res) => {
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  // Optional `path` — see /api/ledger/balance.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  const netArgs = ledgerNetworkArgs(network);
+  const cmd = CLI === 'icp' ? ['cycles', 'balance', ...netArgs] : ['wallet', 'balance', ...netArgs];
+  const result = runCliSync(cmd, projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // icp CLI: "Balance: 314_540_000_000 cycles"
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  const cycles = match ? match[1].replace(/[_,]/g, '') : result.data.trim();
+  res.json({ cycles, raw: result.data });
+});
+
+// The cycles-ledger (TCYCLES) balance of an arbitrary principal, which for a
+// canister principal is a DIFFERENT number from the cycles that canister runs
+// on. The two are easy to confuse: a canister can hold exactly 7.5T on the
+// ledger while running on 7.53T of its own, which reads like the same figure
+// twice. Nothing here can move cycles; the
+// ledger's `withdraw` goes ledger -> canister, and no management-canister
+// method takes cycles back out of a running canister.
+app.get('/api/cycles/principal-balance', (req, res) => {
+  const principal = req.query.principal;
+  if (!principal) return res.status(400).json({ error: 'principal required' });
+  try { assertSafeName(principal, 'principal'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (CLI !== 'icp') return res.status(400).json({ error: 'Cycles-ledger balances need the icp CLI' });
+
+  const network = req.query.network;
+  if (network) { try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); } }
+  // `path` is required in practice for a named environment: resolving `-e` reads
+  // that project's icp.yaml, so the CLI must run with the project as cwd.
+  let projectPath;
+  if (req.query.path) {
+    try { projectPath = assertProjectDir(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+
+  const result = runCliSync(['cycles', 'balance', ...ledgerNetworkArgs(network), '--of-principal', principal], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  // icp 1.0.0 prints `Balance: 7_500_000_000_000 cycles`, and 0 for an account
+  // that has never been funded — which is a real answer, not an absence.
+  const match = result.data.match(/([\d_,]+)\s*cycles/i);
+  if (!match) return res.status(500).json({ error: `Could not read a balance from: ${result.data.trim()}` });
+  res.json({ principal, cycles: match[1].replace(/[_,]/g, ''), raw: result.data });
+});
+
+// Which canisters the owner wants a ledger balance shown for. Opt-in per
+// canister and persisted, because the reading costs a CLI call per canister and
+// is meaningless for most of them: of eight canisters checked on 2026-09-16,
+// five held exactly zero.
+app.post('/api/fleet/ledger-watch', (req, res) => {
+  const { path: projectPath, canister, network, enabled } = req.body || {};
+  let safePath;
+  try {
+    safePath = assertSafePath(projectPath, 'Project path');
+    assertSafeName(canister, 'canister');
+    assertSafeName(network, 'network');
+  } catch (e) { return res.status(400).json({ error: e.message }); }
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+
+  const settings = readSettings();
+  if (!settings.fleetLedgerWatch || typeof settings.fleetLedgerWatch !== 'object') settings.fleetLedgerWatch = {};
+  const byProject = settings.fleetLedgerWatch[safePath] || (settings.fleetLedgerWatch[safePath] = {});
+  const byNetwork = byProject[network] || (byProject[network] = {});
+
+  if (enabled) byNetwork[canister] = true;
+  else delete byNetwork[canister];
+
+  // Prune emptied branches so the settings file doesn't accrete dead keys
+  if (Object.keys(byNetwork).length === 0) delete byProject[network];
+  if (Object.keys(byProject).length === 0) delete settings.fleetLedgerWatch[safePath];
+
+  writeSettings(settings);
+  res.json({ ok: true, canister, network, ledgerWatch: !!enabled });
+});
+
+// Mint cycles from ICP — rate limited (financial operation)
+app.post('/api/cycles/mint', rateLimit(60000, 5), (req, res) => {
+  const { amount, unit } = req.body; // unit: 'icp' or 'cycles'
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    return res.status(400).json({ error: 'amount must be a positive number' });
+  }
+  if (!unit || !['icp', 'cycles'].includes(unit)) {
+    return res.status(400).json({ error: 'unit must be "icp" or "cycles"' });
+  }
+  const flag = unit === 'icp' ? '--icp' : '--cycles';
+  const cmd = CLI === 'icp'
+    ? ['cycles', 'mint', flag, String(amount), '-n', 'ic']
+    : ['ledger', 'fabricate-cycles', '--amount', String(amount)]; // dfx fallback
+  const result = runCliSync(cmd);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Get wallet balance (dfx-specific; icp CLI may not support wallet subcommand)
+app.post('/api/wallet/balance', (req, res) => {
+  const { path: projectPath, network } = req.body;
+  if (CLI === 'icp') {
+    return res.status(501).json({ error: 'Wallet balance not supported with icp CLI. Use canister status for cycles info.' });
+  }
+  const result = runCliSync(['wallet', 'balance', ...networkArgs(network)], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+  res.json({ balance: result.data });
+});
+
+// Get cycles balance for specific canister (legacy endpoint kept for compat)
+app.post('/api/cycles/balance', (req, res) => {
+  const { path: projectPath, canister, network } = req.body;
+  try { assertSafeName(canister, 'canister'); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const result = runCliSync(['canister', 'status', canister, ...networkArgs(network)], projectPath);
+  if (!result.ok) return res.status(500).json({ error: result.data });
+
+  const parsed = parseCanisterStatus(result.data);
+  res.json({ canister, cycles: parsed.cycles || 'unknown', raw: result.data });
+});
+
+// Check cycles ledger balance held under a canister's principal
+// Queries the cycles ledger (um5iw-rqaaa-aaaaq-qaaba-cai) ICRC-1 balance_of
+const CYCLES_LEDGER = 'um5iw-rqaaa-aaaaq-qaaba-cai';
+app.post('/api/cycles/ledger-balance', (req, res) => {
+  const { canisterId, network, path: reqPath } = req.body;
+  if (!canisterId || !/^[a-z0-9\-]+$/.test(canisterId)) {
+    return res.status(400).json({ error: 'Invalid canister ID' });
+  }
+  // Only meaningful on mainnet — local replica won't have the cycles ledger
+  if (!network || network === 'local') {
+    return res.json({ canisterId, balance: '0' });
+  }
+  let netArgs, projectPath;
+  try {
+    netArgs = ledgerNetworkArgs(network);
+    if (reqPath) projectPath = assertProjectDir(reqPath);
+  } catch (e) { return res.status(400).json({ error: e.message }); }
+  const candid = `(record { owner = principal "${canisterId}"; subaccount = null })`;
+  const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
+  if (!result.ok) return res.json({ canisterId, balance: '0', error: result.data });
+  // Output: "(2_850_000_000_000 : nat)"
+  const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
+  const balance = match ? match[1].replace(/_/g, '') : '0';
+  res.json({ canisterId, balance });
+});
+
+// Batch check cycles ledger balances for multiple canisters
+app.post('/api/cycles/ledger-balances', (req, res) => {
+  const { canisterIds, network, path: reqPath } = req.body;
+  if (!canisterIds || !Array.isArray(canisterIds)) {
+    return res.status(400).json({ error: 'canisterIds array required' });
+  }
+  if (!network || network === 'local') {
+    return res.json(Object.fromEntries(canisterIds.map(id => [id, '0'])));
+  }
+  let netArgs, projectPath;
+  try {
+    netArgs = ledgerNetworkArgs(network);
+    if (reqPath) projectPath = assertProjectDir(reqPath);
+  } catch (e) { return res.status(400).json({ error: e.message }); }
+  const results = {};
+  for (const cid of canisterIds) {
+    if (!/^[a-z0-9\-]+$/.test(cid)) { results[cid] = '0'; continue; }
+    const candid = `(record { owner = principal "${cid}"; subaccount = null })`;
+    const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
+    if (result.ok) {
+      const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
+      results[cid] = match ? match[1].replace(/_/g, '') : '0';
+    } else {
+      results[cid] = '0';
+    }
+  }
+  res.json(results);
+});
+
+// Resolve the port a project's local network binds, from its own icp.yaml.
+//
+// `icp network start --help` says to set `gateway.port` in icp.yaml, and that
+// instruction is wrong about the location: `gateway` is not a top-level field.
+// Verified against icp 1.0.0, whose manifest parser answers a top-level
+// `gateway:` with "unknown field `gateway`, expected one of `canisters`,
+// `networks`, `environments`". It belongs on a `networks:` entry:
+//
+//   networks:
+//     - name: local
+//       mode: managed        # managed | connected
+//       gateway:
+//         port: 4943
+//
+// Line-based like parseProjectConfig above, because this project has no YAML
+// dependency (express and ws are the only two).
+//
+// Returns null when the project declares no port, `{ port: N }` for a fixed
+// one, and `{ ephemeral: true }` for `port: 0`. Those last two are both real
+// declarations and must not be collapsed: `port: 0` means "let the OS pick",
+// so the value exists only at runtime. Treating it as an absence is what made
+// this endpoint report a stopped network as running, by falling
+// back to the defaults and finding a DIFFERENT project's replica on 4943.
+function resolveGatewayConfig(projectPath, network = 'local') {
+  if (!projectPath) return null;
+  const icpYamlPath = join(projectPath, 'icp.yaml');
+  if (!existsSync(icpYamlPath)) return null;
+
+  let raw;
+  try { raw = readFileSync(icpYamlPath, 'utf-8'); } catch { return null; }
+
+  const lines = raw.split('\n');
+  const start = lines.findIndex((l) => /^networks:\s*$/.test(l));
+  if (start === -1) return null;
+
+  // The networks block runs until the next top-level key.
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\S/.test(lines[i])) { end = i; break; }
+  }
+
+  // Split the block into list items on the "- " bullets.
+  const block = lines.slice(start + 1, end);
+  const items = [];
+  for (const line of block) {
+    if (/^\s*-\s/.test(line)) items.push([line.replace(/^(\s*)-\s/, '$1  ')]);
+    else if (items.length) items[items.length - 1].push(line);
+  }
+
+  for (const item of items) {
+    const text = item.join('\n');
+    const nameMatch = text.match(/^\s*name:\s*["']?([^"'\s#]+)/m);
+    if (!nameMatch || nameMatch[1] !== network) continue;
+    // port: must be inside this item's gateway: sub-block, not a sibling key.
+    const gwIdx = item.findIndex((l) => /^\s*gateway:\s*$/.test(l));
+    if (gwIdx === -1) return null;
+    const gwIndent = item[gwIdx].search(/\S/);
+    for (let i = gwIdx + 1; i < item.length; i++) {
+      const indent = item[i].search(/\S/);
+      if (indent === -1) continue;
+      if (indent <= gwIndent) break; // left the gateway block
+      const p = item[i].match(/^\s*port:\s*(\d+)/);
+      if (p) {
+        const port = Number(p[1]);
+        if (port === 0) return { ephemeral: true };
+        return port > 0 && port < 65536 ? { port } : null;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+// What the project's local network is ACTUALLY doing, per the CLI.
+//
+// This is an observation; icp.yaml is only an intention, and it is the only
+// thing that can answer `port: 0`. It is also project-scoped, so unlike a bare
+// port probe it cannot mistake another project's replica for this one.
+//
+// `icp network status` prints, when the network is up:
+//     Api Url: http://localhost:4943/
+//     Gateway Url: http://localhost:4943/
+// and otherwise fails with "the local network for this project is not running".
+async function readLiveGatewayPort(projectPath) {
+  if (!projectPath || CLI !== 'icp') return null;
+  const result = await runCliAsync(['network', 'status'], projectPath);
+  if (!result.ok) return null;
+  const m = result.data.match(/Gateway Url:\s*https?:\/\/[^:/\s]+:(\d+)/i);
+  return m ? Number(m[1]) : null;
+}
+
+// Check if local replica is running by hitting its status endpoint directly.
+// More reliable than CLI ping (varies by version/args) and CLI-agnostic.
+//
+// Takes an optional `path` so the project's declared gateway port can be read.
+// Without it this probed only 8000 and 4943 and reported "stopped" for any
+// project that had moved its gateway — which is exactly what you do when
+// something else already holds 8000.
+app.get('/api/replica/status', async (req, res) => {
+  const projectPath = req.query.path || null;
+  const cfg = resolveGatewayConfig(projectPath, 'local');
+  const declared = cfg && cfg.port ? cfg.port : null;
+  const ephemeral = !!(cfg && cfg.ephemeral);
+
+  const probe = async (port) => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/v2/status`, { signal: AbortSignal.timeout(1500) });
+      return r.ok;
+    } catch { return false; }
+  };
+
+  // With a project in hand, ask the CLI what is running rather than guessing
+  // from ports. This is the only branch that can answer `port: 0`, and the only
+  // one that cannot attribute another project's replica to this one.
+  if (projectPath) {
+    const livePort = await readLiveGatewayPort(projectPath);
+    if (livePort) {
+      const running = await probe(livePort);
+      return res.json({ running, cli: CLI, port: livePort, declaredPort: declared, ephemeral });
+    }
+    // CLI says this project's network is not running. Report the port its links
+    // would use once it is — which is unknowable when the port is ephemeral.
+    return res.json({
+      running: false,
+      cli: CLI,
+      port: declared || (ephemeral ? null : CLI === 'icp' ? 8000 : 4943),
+      declaredPort: declared,
+      ephemeral,
+    });
+  }
+
+  // No project selected yet (app mount). Nothing better than the CLI defaults is
+  // available, and a hit here may belong to any project — hence `attributed`.
+  for (const port of [8000, 4943]) {
+    if (await probe(port)) {
+      return res.json({ running: true, cli: CLI, port, declaredPort: null, ephemeral: false, attributed: false });
+    }
+  }
+  res.json({ running: false, cli: CLI, port: CLI === 'icp' ? 8000 : 4943, declaredPort: null, ephemeral: false });
+});
+
+// Start local replica
+app.post('/api/replica/start', (req, res) => {
+  const { path: projectPath, clean } = req.body;
+  const args = CLI === 'icp'
+    ? ['network', 'start', '-d', ...(clean ? ['--clean'] : [])]
+    : ['start', '--background', ...(clean ? ['--clean'] : [])];
+
+  const child = spawn(CLI, args, {
+    cwd: projectPath || process.cwd(),
+    stdio: 'pipe',
+    env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+  });
+
+  let output = '';
+  let responded = false;
+  child.stdout.on('data', (d) => (output += d.toString()));
+  child.stderr.on('data', (d) => (output += d.toString()));
+  child.on('close', (code) => {
+    if (responded) return;
+    responded = true;
+    if (code === 0) {
+      res.json({ ok: true, output });
+    } else {
+      res.status(500).json({ error: output });
+    }
+  });
+  child.on('error', (err) => {
+    if (responded) return;
+    responded = true;
+    res.status(500).json({ error: err.message });
+  });
+});
+
+// Stop local replica
+app.post('/api/replica/stop', (_req, res) => {
+  const args = CLI === 'icp' ? ['network', 'stop'] : ['stop'];
+  const result = runCliSync(args);
+  res.json({ ok: result.ok, output: result.data });
+});
+
+// Browse directory (for folder picker)
+app.post('/api/browse', (req, res) => {
+  const { path: dirPath } = req.body;
+  const home = HOME;
+  const target = dirPath || home;
+
+  // Restrict browsing to home directory and below
+  if (!home) {
+    return res.status(500).json({ error: 'HOME environment variable is not set' });
+  }
+  const resolved = resolve(target);
+  if (resolved !== home && !resolved.startsWith(home + sep)) {
+    return res.status(403).json({ error: 'Cannot browse outside home directory' });
+  }
+
+  try {
+    const entries = readdirSync(resolved, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+      .map((e) => ({
+        name: e.name,
+        path: join(resolved, e.name),
+        hasIcpYaml: existsSync(join(resolved, e.name, 'icp.yaml')),
+        hasDfxJson: existsSync(join(resolved, e.name, 'dfx.json')),
+        isIcpProject: existsSync(join(resolved, e.name, 'icp.yaml')) || existsSync(join(resolved, e.name, 'dfx.json')),
+      }))
+      .sort((a, b) => {
+        // ICP projects first
+        if (a.isIcpProject && !b.isIcpProject) return -1;
+        if (!a.isIcpProject && b.isIcpProject) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    const parentPath = dirname(resolved);
+    // Don't let parent go above home
+    const safeParent = (parentPath === home || parentPath.startsWith(home + sep)) ? parentPath : home;
+    res.json({ current: resolved, parent: safeParent, entries });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to browse directory' });
+  }
+});
+
+// ---------- WebSocket: live deploy ----------
+
+// Limit concurrent WebSocket connections
+const MAX_WS_CONNECTIONS = 5;
+wss.on('connection', (ws, req) => {
+  // Verify WebSocket origin — must match this server's port exactly
+  const origin = req.headers.origin || '';
+  const allowedWsOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+  if (origin && !allowedWsOrigins.includes(origin)) {
+    ws.close(1008, 'Forbidden: invalid origin');
+    return;
+  }
+
+  if (wss.clients.size > MAX_WS_CONNECTIONS) {
+    ws.close(1013, 'Too many connections');
+    return;
+  }
+
+  ws.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      ws.send(JSON.stringify({ type: 'error', data: 'Invalid JSON' }));
+      return;
+    }
+
+    if (msg.action === 'deploy') {
+      const { path: projectPath, network, canisters, identity, mode } = msg;
+
+      if (!projectPath) {
+        ws.send(JSON.stringify({ type: 'error', data: 'Project path required' }));
+        return;
+      }
+      try { assertSafePath(projectPath); } catch (e) {
+        ws.send(JSON.stringify({ type: 'error', data: e.message }));
+        return;
+      }
+
+      // Switch identity if specified
+      if (identity) {
+        try { assertSafeName(identity, 'identity'); } catch (e) {
+          ws.send(JSON.stringify({ type: 'error', data: e.message }));
+          return;
+        }
+        const useCmd = CLI === 'icp' ? ['identity', 'default', identity] : ['identity', 'use', identity];
+        const idResult = runCliSync(useCmd);
+        if (!idResult.ok) {
+          ws.send(JSON.stringify({ type: 'error', data: `Failed to switch identity: ${idResult.data}` }));
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'log', data: `Switched to identity: ${identity}` }));
+      }
+
+      // Optional: build before deploy
+      if (msg.build) {
+        // Validate canister names before build
+        if (canisters && canisters.length > 0) {
+          for (const c of canisters) {
+            try { assertSafeName(c, 'canister'); } catch (e) {
+              ws.send(JSON.stringify({ type: 'error', data: e.message }));
+              return;
+            }
+          }
+        }
+
+        ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} build ${(canisters || []).join(' ')}` }));
+        ws.send(JSON.stringify({ type: 'status', data: 'building' }));
+
+        const buildArgs = ['build'];
+        if (canisters && canisters.length > 0) buildArgs.push(...canisters);
+
+        const buildResult = spawnSync(CLI, buildArgs, {
+          cwd: projectPath,
+          encoding: 'utf-8',
+          timeout: 300000,
+          env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+        });
+
+        if (buildResult.stdout) ws.send(JSON.stringify({ type: 'log', data: buildResult.stdout }));
+        if (buildResult.stderr) ws.send(JSON.stringify({ type: 'log', data: buildResult.stderr }));
+
+        if (buildResult.status !== 0) {
+          ws.send(JSON.stringify({ type: 'log', data: '\n--- Build failed ---' }));
+          ws.send(JSON.stringify({ type: 'status', data: 'error' }));
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'log', data: '--- Build successful ---\n' }));
+      }
+
+      // Build deploy command
+      const args = ['deploy'];
+      if (canisters && canisters.length > 0) {
+        for (const c of canisters) {
+          try { assertSafeName(c, 'canister'); } catch (e) {
+            ws.send(JSON.stringify({ type: 'error', data: e.message }));
+            return;
+          }
+        }
+        args.push(...canisters);
+      }
+      // Deploy mode (upgrade, reinstall, install)
+      if (mode && ['upgrade', 'reinstall', 'install'].includes(mode)) {
+        args.push('--mode', mode);
+      }
+      args.push(...networkArgs(network));
+
+      ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} ${args.join(' ')}` }));
+      ws.send(JSON.stringify({ type: 'status', data: 'deploying' }));
+
+      const child = spawn(CLI, args, {
+        cwd: projectPath,
+        env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+      });
+
+      let deployOutput = '';
+
+      // Cancel handler — wired once per deploy and removed when the deploy ends,
+      // so listeners don't accumulate across deploys and a cancel only kills
+      // the current deploy's child.
+      const onCancel = (innerRaw) => {
+        try {
+          const innerMsg = JSON.parse(innerRaw);
+          if (innerMsg.action === 'cancel') {
+            child.kill('SIGTERM');
+            ws.send(JSON.stringify({ type: 'log', data: '\n--- Deploy cancelled ---' }));
+            ws.send(JSON.stringify({ type: 'status', data: 'cancelled' }));
+          }
+        } catch {}
+      };
+      ws.on('message', onCancel);
+
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        deployOutput += text;
+        ws.send(JSON.stringify({ type: 'log', data: text }));
+      });
+
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        deployOutput += text;
+        ws.send(JSON.stringify({ type: 'log', data: text }));
+      });
+
+      child.on('close', (code) => {
+        // Remove the cancel listener now that this deploy has ended.
+        ws.removeListener('message', onCancel);
+
+        if (code === 0 && projectPath) {
+          // Record deploy history for each deployed canister
+          const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
+          for (const name of deployedNames) {
+            // Fetch the module hash of the just-deployed canister
+            const statusResult = runCliSync(['canister', 'status', name, ...networkArgs(network)], projectPath);
+            let moduleHash = null;
+            if (statusResult.ok) {
+              const hashMatch = statusResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
+              moduleHash = hashMatch ? hashMatch[1] : null;
+            }
+            const entry = recordDeploy(projectPath, { canister: name, network, moduleHash, deployMode: mode || 'auto' });
+            ws.send(JSON.stringify({ type: 'log', data: `Recorded deploy: ${name} @ ${entry.gitCommit || 'unknown'} (${entry.gitBranch || 'unknown'})` }));
+          }
+        }
+
+        // Parse deploy output to give clear per-canister results
+        let finalStatus = code === 0 ? 'success' : 'error';
+
+        // Determine which canisters succeeded/failed
+        const failedSync = [...deployOutput.matchAll(/Failed to sync canister '([\w-]+)'/g)].map(m => m[1]);
+        const failedInstall = [...deployOutput.matchAll(/Failed to install.*?'([\w-]+)'/g)].map(m => m[1]);
+        const allFailed = [...new Set([...failedSync, ...failedInstall])];
+        const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
+        const succeeded = deployedNames.filter(n => !allFailed.includes(n));
+
+        if (code !== 0) {
+          const cyclesMatch = deployOutput.match(/Insufficient cycles.*?Requested:\s*([\d_]+).*?available.*?:\s*([\d_]+)/s);
+          const moduleMatch = deployOutput.match(/Cannot install.*already has.*module/i);
+
+          if (failedSync.length > 0 && succeeded.length > 0) {
+            // Partial success — some canisters deployed, asset sync failed for others
+            finalStatus = 'success';
+          }
+
+          // Show per-canister results
+          ws.send(JSON.stringify({ type: 'log', data: '\n--- Deploy Results ---' }));
+          for (const name of succeeded) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✓ ${name} — deployed successfully` }));
+          }
+          for (const name of failedSync) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✗ ${name} — WASM installed but asset sync failed` }));
+            const assetMatch = deployOutput.match(new RegExp(`Failed to sync canister '${name}'[\\s\\S]*?(?:Failed to get asset properties for\\s+(\\S+)|failed to synchronize asset canister:\\s*(.+?)(?:\\n|$))`));
+            if (assetMatch) {
+              const detail = assetMatch[1] ? `Problem file: ${assetMatch[1]}` : (assetMatch[2] || '');
+              if (detail) ws.send(JSON.stringify({ type: 'log', data: `    ${detail}` }));
+            }
+            ws.send(JSON.stringify({ type: 'log', data: `    Try: icp deploy ${name} ${networkArgs(network).join(' ')}` }));
+          }
+          for (const name of failedInstall) {
+            ws.send(JSON.stringify({ type: 'log', data: `  ✗ ${name} — failed to install` }));
+          }
+
+          if (cyclesMatch) {
+            ws.send(JSON.stringify({ type: 'log', data: `\nHint: Not enough cycles. Run "icp cycles mint" to convert ICP to cycles.` }));
+          } else if (moduleMatch) {
+            ws.send(JSON.stringify({ type: 'log', data: `\nHint: Canister already has code installed. Use "Upgrade" or "Reinstall" deploy mode instead of "Install".` }));
+          }
+        }
+
+        const finalMessage = code === 0
+          ? '\n--- Deploy completed successfully ---'
+          : finalStatus === 'success'
+            ? '\n--- Deploy completed with warnings ---'
+            : `\n--- Deploy failed ---`;
+
+        ws.send(JSON.stringify({ type: 'status', data: finalStatus }));
+        ws.send(JSON.stringify({ type: 'log', data: finalMessage }));
+      });
+
+      child.on('error', (err) => {
+        ws.removeListener('message', onCancel);
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            data: `Spawn error: ${err.message}`,
+          })
+        );
+      });
+    }
+
+    if (msg.action === 'start-replica') {
+      const { path: projectPath, clean } = msg;
+
+      // Validate path before using as cwd
+      if (projectPath) {
+        try { assertSafePath(projectPath); } catch (e) {
+          ws.send(JSON.stringify({ type: 'error', data: e.message }));
+          return;
+        }
+      }
+
+      const args = CLI === 'icp'
+        ? ['network', 'start', '-d', ...(clean === true ? ['--clean'] : [])]
+        : ['start', '--background', ...(clean === true ? ['--clean'] : [])];
+
+      ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} ${args.join(' ')}` }));
+      ws.send(JSON.stringify({ type: 'status', data: 'starting-replica' }));
+
+      const child = spawn(CLI, args, {
+        cwd: projectPath || process.cwd(),
+        env: { ...process.env, HOME, PWD: projectPath || process.cwd() },
+      });
+
+      let combined = '';
+      let replicaSettled = false;
+      child.stdout.on('data', (chunk) => {
+        combined += chunk.toString();
+        ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
+      });
+      child.stderr.on('data', (chunk) => {
+        combined += chunk.toString();
+        ws.send(JSON.stringify({ type: 'log', data: chunk.toString() }));
+      });
+      child.on('close', (code) => {
+        if (replicaSettled) return;
+        replicaSettled = true;
+        // Treat "already running" as success — the replica is up, which is the caller's goal.
+        const alreadyRunning = /already\s+running/i.test(combined);
+        const ok = code === 0 || alreadyRunning;
+        ws.send(
+          JSON.stringify({
+            type: 'status',
+            data: ok ? 'replica-running' : 'replica-error',
+          })
+        );
+      });
+      child.on('error', (err) => {
+        if (replicaSettled) return;
+        replicaSettled = true;
+        ws.send(JSON.stringify({ type: 'log', data: `Spawn error: ${err.message}` }));
+        ws.send(JSON.stringify({ type: 'status', data: 'replica-error' }));
+      });
+    }
+  });
+});
+
+// ---------- Settings persistence ----------
+
+const SETTINGS_FILE = join(HOME, '.canister-panel-settings.json');
+
+function readSettings() {
+  if (!existsSync(SETTINGS_FILE)) return {};
+  try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')); } catch { return {}; }
+}
+
+function writeSettings(settings) {
+  try { writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+app.get('/api/settings', (_req, res) => {
+  res.json(readSettings());
+});
+
+app.post('/api/settings', (req, res) => {
+  const ALLOWED_KEYS = ['lastProject', 'lastNetwork', 'buildBeforeDeploy', 'recentProjects',
+    'autoTopupEnabled', 'autoTopupProjects', 'autoTopupReserveCycles', 'autoTopupReserveIcp', 'autoTopupCooldownMinutes'];
+  const current = readSettings();
+  const filtered = Object.fromEntries(
+    Object.entries(req.body).filter(([k]) => ALLOWED_KEYS.includes(k))
+  );
+  const updated = { ...current, ...filtered };
+  writeSettings(updated);
+  res.json(updated);
+});
+
+// Recent projects list
+app.post('/api/settings/add-project', (req, res) => {
+  const { path: projectPath, name } = req.body;
+  if (!projectPath) return res.status(400).json({ error: 'path required' });
+
+  const settings = readSettings();
+  if (!settings.recentProjects) settings.recentProjects = [];
+
+  // Remove if already exists, add to front
+  settings.recentProjects = settings.recentProjects.filter(p => p.path !== projectPath);
+  settings.recentProjects.unshift({ path: projectPath, name: name || basename(projectPath), lastUsed: new Date().toISOString() });
+
+  // Keep max 10
+  settings.recentProjects = settings.recentProjects.slice(0, 10);
+
+  writeSettings(settings);
+  res.json(settings);
+});
+
+// Global error handler — catch unhandled route errors, never leak stack traces
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ---------- start ----------
+
+const PORT = process.env.PORT || 3456;
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`\n  ICP Deploy`);
+  console.log(`  --------------------`);
+  console.log(`  Open http://localhost:${PORT}\n`);
+  startAutoTopupMonitor();
+});
