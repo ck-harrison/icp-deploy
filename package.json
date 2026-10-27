@@ -16,7 +16,7 @@
     "check": "node -c server.js && node scripts/check-frontend.cjs"
   },
   "dependencies": {
-    "express": "^4.21.0",
+    "express": "^4.22.3",
     "ws": "^8.18.0"
   }
 }

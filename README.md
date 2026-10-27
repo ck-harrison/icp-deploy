@@ -1,7 +1,8 @@
 # ICP Deploy
 
-A local browser dashboard for deploying and managing [Internet Computer](https://internetcomputer.org)
-canisters. It wraps the `icp` CLI, so day-to-day jobs like deploying, topping up
+A lightweight alternative to typing `icp` CLI (or `dfx`) commands by hand: a local
+browser dashboard for deploying and managing [Internet Computer](https://internetcomputer.org)
+canisters. It runs the `icp` CLI for you, so day-to-day jobs like deploying, topping up
 cycles, snapshotting and checking on every canister you own become point-and-click.
 
 Everything runs on your own machine. No accounts, no cloud, no telemetry.
@@ -10,11 +11,11 @@ Everything runs on your own machine. No accounts, no cloud, no telemetry.
 
 - **Deploy**: pick canisters, choose install / upgrade / reinstall, watch the build output live
 - **Canisters**: cycles, memory, status, module hash and controllers for each canister
+- **Snapshots**: create, restore, download and delete canister snapshots (stop and restart handled for you)
 - **Fleet**: every canister across all your recent projects on one page, split into Production and Staging, with a health audit
 - **Cycles**: mint cycles from ICP, top up canisters, see your spending history
 - **Auto top-up**: refill a canister automatically when it drops below a threshold you set
-- **Snapshots**: create, restore, download and delete canister snapshots (stop and restart handled for you)
-- **Identities**: switch, create, import and export `icp` identities
+- **Identities**: switch between and rename your `icp` identities. Creating, importing and exporting stay in the terminal, so the dashboard never handles private keys
 - **Safety rails**: every mainnet deploy asks first; reinstall and delete make you type a confirmation phrase
 
 ## Platform support
@@ -28,7 +29,8 @@ Everything runs on your own machine. No accounts, no cloud, no telemetry.
 ## Requirements
 
 - **Node.js 18 or newer**
-- **The `icp` CLI**, version 1.0.0 or newer: [install instructions](https://github.com/dfinity/icp-cli)
+- **The `icp` CLI**, version 1.0.0 or newer: [install instructions](https://github.com/dfinity/icp-cli).
+  If `icp` is not installed but `dfx` is, the dashboard falls back to `dfx`. That path is not regularly tested.
 - An ICP project with an `icp.yaml` (or a legacy `dfx.json`)
 
 ## Quick start
@@ -61,36 +63,96 @@ started from the Dock do not see your shell's `PATH`), so re-run the script if y
 move the folder, reinstall Node, or install `icp` later. `brew install librsvg`
 first if you want the proper icon instead of a generic one.
 
-## Help
+## Using the dashboard
 
-Click the **?** button in the top-right corner of the dashboard for a quick guide.
-The essentials:
+Click the **?** button in the top-right corner of the dashboard for a short version
+of this guide.
 
-### Getting around
+### The header (always visible)
 
-1. Paste the path to an ICP project and press Enter (or click **Browse**). Recent projects are remembered.
-2. Choose a network with the switch on the right: **Local** (a replica on your machine) or **Production** (mainnet). Other environments from your `icp.yaml` appear there too.
-3. For Local, start the replica with the **Start** button next to "Replica" in the header.
-4. Use the tabs: **Deploy**, **Canisters**, **Snapshots** and **Fleet**.
+- **Project folder**: paste the path to an ICP project and press Enter, or click
+  **Browse**. Recent projects are remembered and listed underneath.
+- **Balances**: the ICP and cycles held by your current identity. Click a balance
+  to see your spending history, or the refresh icon to re-read it.
+- **Mint**: turns ICP from your identity into cycles you can spend on top-ups.
+- **Principal**: your current identity's principal, with a copy button.
+- **Replica**: shows whether a local replica is running for this project, with
+  **Start** and **Stop**. You only need it when deploying to Local.
+- **Network switch** (right of the tabs): **Local** is a replica on your machine,
+  **Production** is mainnet. Other environments from your `icp.yaml` (such as
+  `staging`) appear here too, and **+** adds one. The switch applies to the
+  Deploy, Canisters and Snapshots tabs. It is hidden on Fleet, which always
+  covers every network.
 
-### Deploy modes
+### Deploy
 
-- **Auto**: installs a canister if it is new, upgrades it otherwise. The right choice almost always.
-- **Upgrade**: replaces the code and keeps the data.
-- **Reinstall**: replaces the code and **wipes all data**. You will be asked to type a phrase to confirm.
-- **Install**: only for canisters that have never been deployed.
+Use this tab to put new code on a canister.
+
+1. **Identity**: check which identity will deploy. Changing it here changes the
+   `icp` CLI's default identity for your whole machine, including your terminal.
+   **Rename** is available; to create, import or export an identity, use
+   `icp identity new`, `icp identity import` or `icp identity export` in the terminal.
+2. **Deploy mode**:
+   - **Auto**: installs a canister if it is new, upgrades it otherwise. The right choice almost always.
+   - **Upgrade**: replaces the code and keeps the data.
+   - **Reinstall**: replaces the code and **wipes all data**. You will be asked to type a phrase to confirm.
+   - **Install**: only for canisters that have never been deployed.
+3. **Build before deploy**: leave on unless you have just built the project yourself.
+4. **Canisters**: tick the ones to deploy. A badge on the Deploy tab counts
+   canisters whose on-chain code differs from your last local build.
+5. Press **Deploy**. Mainnet deploys ask for confirmation first. The build and
+   deploy output streams into **Logs** on the right. **Summary**, next to it,
+   shows each canister's ID, status, and whether your local build differs from
+   what is deployed. Once your frontend is deployed, **Open App** links to it.
+
+The **Auto top-up** panel on this tab holds the settings that apply to every
+canister: a master on/off switch, how much ICP and cycles to always keep on your
+identity, and **Run now** to check immediately instead of waiting.
+
+### Canisters
+
+Use this tab to look after canisters that are already deployed, on the network
+selected in the header.
+
+- Each card shows status (running or stopped), cycles balance and memory.
+  Warnings appear on the card, for example when your identity is not a
+  controller of that canister.
+- **Top Up**: send cycles from your identity to the canister. Paying with ICP
+  mints on mainnet, so it is refused for Local canisters.
+- **Auto**: set a minimum balance and a top-up amount for this canister (see
+  [Auto top-up](#auto-top-up)). **Top-up History** lists past top-ups.
+- **Controllers**: see who controls the canister, add a controller, or remove one.
+- **Start / Stop**: stop a canister before risky maintenance, start it again after.
+- **Delete**: permanently removes the canister. You type a phrase to confirm.
+- The **Dashboard** link opens the canister on the public ICP dashboard.
+
+### Snapshots
+
+Use this tab to save a canister's full state before something risky, and to roll
+back if it goes wrong.
+
+1. Pick a canister.
+2. **Create Snapshot**: the dashboard stops the canister, takes the snapshot and
+   starts it again.
+3. From the list you can **restore** a snapshot (puts the canister back exactly as
+   it was), **delete** it, or **download** it to a folder on your machine.
+4. **Upload from Directory** loads a previously downloaded snapshot back onto the canister.
+5. **Extract Data** reads metadata such as the canister's Candid interface.
 
 ### Fleet
 
-Fleet scans every recent project in one go and shows all your mainnet and staging
-canisters together, with cycles health, top-up buttons and auto top-up.
+Use this tab to see every canister you run, across all your recent projects, on one
+page, with cycles health, roughly how many days each canister's cycles will last,
+top-up buttons and auto top-up. It scans every network at
+once, so the network switch is hidden here, and each row shows the network it
+actually runs on.
 
 - **You decide which column a canister is in.** Until you do, the dashboard
   guesses from the network and marks the row `undefined`. The **Review** button
   lists the guesses so you can confirm or move them. Your choices are saved in the
   dashboard's own settings, never in your project files.
 - **Staging does not mean free.** A staging environment usually runs on mainnet
-  and spends real cycles. Every row shows the network it actually runs on.
+  and spends real cycles. Check the network badge on each row.
 - **Fleet audit** (collapsed, only shown when there is something to report) flags
   canisters with a single controller (lose that identity and the canister is
   stuck forever) and canisters on the default 30-day freezing threshold.
@@ -103,9 +165,13 @@ canisters together, with cycles health, top-up buttons and auto top-up.
 
 ### Auto top-up
 
-Click **Auto top-up** on a canister to set a minimum balance and a top-up amount.
-The server checks every 5 minutes and tops up any canister below its minimum.
-It only runs **while the dashboard server is running**: close it and top-ups stop.
+Click **Auto** on a canister (Canisters or Fleet tab) to set a minimum balance and a
+top-up amount. The server checks every 5 minutes and tops up any canister below its
+minimum. It pays from your identity's cycles first and, if those run short, mints
+the difference from your identity's ICP, never dipping below the reserves set on
+the Deploy tab. It checks the live ICP price of those cycles before minting and
+skips the top-up if the mint would take your ICP below its reserve. It only runs **while the dashboard server is running**: close it
+and top-ups stop.
 
 ### Local replica port
 
@@ -138,13 +204,19 @@ whatever you set.
 ## Where it keeps data
 
 - `~/.canister-panel-settings.json`: recent projects, Fleet classifications, auto top-up settings
-- `.deploy-history.json` and `.autotopup.json` in each project folder you use it with (consider adding them to that project's `.gitignore`)
+- `.deploy-history.json`, `.topup-history.json` and `.autotopup.json` in each project folder you use it with (consider adding them to that project's `.gitignore`)
+- `~/.canister-panel-autotopup.lock`, briefly, while an auto top-up pass runs
+
+Apart from those files, the only project file the dashboard changes is `icp.yaml`
+(or `dfx.json`), and only when you add or remove an environment. It
+never edits `canister_ids.json`.
 
 ## Security
 
-The dashboard can spend your cycles and export your keys, so it only listens on
+The dashboard can spend your cycles and delete your canisters, so it only listens on
 `127.0.0.1` and rejects requests from other websites. **Never expose its port to a
-network.** See [SECURITY.md](SECURITY.md) for details and known limitations.
+network.** It never handles private keys. See [SECURITY.md](SECURITY.md) for details
+and known limitations.
 
 ## Development
 

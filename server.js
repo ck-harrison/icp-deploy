@@ -7,8 +7,7 @@ import { createHash } from 'crypto';
 import { gunzipSync } from 'zlib';
 import { join, dirname, resolve, sep, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { tmpdir, homedir } from 'os';
-import { randomUUID } from 'crypto';
+import { homedir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -17,9 +16,13 @@ const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 }); // 64KB max 
 
 app.use(express.json({ limit: '50kb' }));
 
+// Largest array any batch endpoint accepts. A fleet is tens of canisters.
+const MAX_BATCH = 200;
+
 // Simple rate limiter — per-IP, sliding window
-const rateLimitMap = new Map();
+// Each limiter gets its own map, so (say) top-ups don't use up the delete allowance.
 function rateLimit(windowMs, maxRequests) {
+  const rateLimitMap = new Map();
   return (req, res, next) => {
     const key = req.ip;
     const now = Date.now();
@@ -42,7 +45,15 @@ function rateLimit(windowMs, maxRequests) {
 }
 
 // Security middleware — CORS + CSRF protection (must be before static files and routes)
+// A page on any website can point its own hostname at 127.0.0.1 (DNS
+// rebinding) and then make same-origin requests here, with no Origin header on
+// GETs. The Host header still carries the attacker's name, so only accept ours.
+const allowedHost = (host) => host === `localhost:${PORT}` || host === `127.0.0.1:${PORT}`;
+
 app.use((req, res, next) => {
+  if (!allowedHost(req.headers.host)) {
+    return res.status(403).json({ error: 'Forbidden: unexpected Host header' });
+  }
   // CORS — strict origin check (only allow same localhost:PORT)
   const origin = req.headers.origin;
   const allowed = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
@@ -82,6 +93,40 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// Every query parameter this API reads is a single string. Express parses
+// `?path=a&path=b` into an array, and an array reaching a string helper threw
+// inside an async handler and took the whole server down. Reject it up front,
+// and give GET `path` the same home-directory check as POST bodies.
+app.use('/api', (req, res, next) => {
+  for (const [k, v] of Object.entries(req.query)) {
+    if (typeof v !== 'string') return res.status(400).json({ error: `Query parameter "${k}" must appear once` });
+  }
+  if (req.query.path) {
+    try {
+      assertSafePath(req.query.path, 'Project path');
+    } catch (e) {
+      return res.status(403).json({ error: e.message });
+    }
+  }
+  next();
+});
+
+// Express 4 does not catch a rejected promise from an async handler: it
+// becomes an unhandled rejection and Node exits. Route every handler's
+// rejection (and synchronous throw) to the error handler at the bottom instead.
+for (const method of ['get', 'post']) {
+  const original = app[method].bind(app);
+  app[method] = (route, ...handlers) => original(route, ...handlers.map(h =>
+    typeof h === 'function' && h.length < 4
+      ? (req, res, next) => {
+          try {
+            const r = h(req, res, next);
+            if (r && typeof r.catch === 'function') r.catch(next);
+          } catch (e) { next(e); }
+        }
+      : h));
+}
+
 app.use(express.static(join(__dirname, 'public'), {
   etag: false,
   setHeaders: (res) => {
@@ -95,10 +140,18 @@ app.use(express.static(join(__dirname, 'public'), {
 // Validate inputs to prevent injection via argument values
 const SAFE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-]*$/;
 function assertSafeName(name, label = 'name') {
-  if (!name || !SAFE_NAME_RE.test(name)) {
-    throw new Error(`Invalid ${label}: must start with alphanumeric, then alphanumeric/hyphens/underscores`);
+  if (!name || typeof name !== 'string' || !SAFE_NAME_RE.test(name)) {
+    // status/expose let the error handler answer 400 with this message when a
+    // handler doesn't catch it (e.g. networkArgs() called inline).
+    throw Object.assign(
+      new Error(`Invalid ${label}: must start with alphanumeric, then alphanumeric/hyphens/underscores`),
+      { status: 400, expose: true });
   }
 }
+
+// Textual principal: lowercase base32 groups of five separated by dashes.
+// A looser /^[a-z0-9\-]+$/ also accepts "--help", which the CLI reads as a flag.
+const PRINCIPAL_TEXT_RE = /^[a-z0-9]{5}(?:-[a-z0-9]{1,5})+$/;
 
 // Validate project paths — must be within user's home directory
 // os.homedir() falls back to USERPROFILE on Windows, where HOME is unset.
@@ -495,22 +548,8 @@ app.post('/api/identity/use', (req, res) => {
   res.json({ ok: true, identity: name });
 });
 
-// Create new identity
-app.post('/api/identity/new', (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
-  try {
-    assertSafeName(name, 'identity name');
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-  const cmd = CLI === 'icp'
-    ? ['identity', 'new', name, '--storage', 'plaintext']
-    : ['identity', 'new', name, '--storage-mode', 'plaintext'];
-  const result = runCliSync(cmd);
-  if (!result.ok) return res.status(500).json({ error: result.data });
-  res.json({ ok: true, name, seed: result.data });
-});
+// Creating, importing and exporting identities is deliberately not offered here:
+// those move private keys, and the dashboard never handles keys. Use the icp CLI.
 
 // Rename identity
 app.post('/api/identity/rename', (req, res) => {
@@ -528,54 +567,6 @@ app.post('/api/identity/rename', (req, res) => {
   res.json({ ok: true, oldName, newName });
 });
 
-// Export identity PEM — rate limited (sensitive: exposes private key)
-app.post('/api/identity/export', rateLimit(60000, 3), (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
-  try {
-    assertSafeName(name, 'identity name');
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-  const cmd = ['identity', 'export', name];
-  const result = runCliSync(cmd);
-  if (!result.ok) return res.status(500).json({ error: result.data });
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.json({ ok: true, pem: result.data });
-});
-
-// Import identity from PEM
-app.post('/api/identity/import', (req, res) => {
-  const { name, pem } = req.body;
-  if (!name) return res.status(400).json({ error: 'name required' });
-  if (!pem) return res.status(400).json({ error: 'pem required' });
-  if (!pem.includes('-----BEGIN') || !pem.includes('-----END')) {
-    return res.status(400).json({ error: 'Invalid PEM format' });
-  }
-  if (pem.length > 10000) {
-    return res.status(400).json({ error: 'PEM data too large' });
-  }
-  try {
-    assertSafeName(name, 'identity name');
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-  // Write PEM to temp file, import, then delete
-  const tmpFile = join(tmpdir(), `icp-import-${randomUUID()}.pem`);
-  try {
-    writeFileSync(tmpFile, pem);
-    const cmd = CLI === 'icp'
-      ? ['identity', 'import', name, '--from-pem', tmpFile, '--storage', 'plaintext']
-      : ['identity', 'import', name, tmpFile, '--storage-mode', 'plaintext'];
-    const result = runCliSync(cmd);
-    if (!result.ok) return res.status(500).json({ error: result.data });
-    res.json({ ok: true, name });
-  } finally {
-    try { unlinkSync(tmpFile); } catch (_) {}
-  }
-});
-
 // Get principal for current identity
 app.get('/api/identity/principal', (_req, res) => {
   const cmd = CLI === 'icp' ? ['identity', 'principal'] : ['identity', 'get-principal'];
@@ -586,11 +577,13 @@ app.get('/api/identity/principal', (_req, res) => {
 
 // Parse a project's dfx.json or icp.yaml into { canisters, networks, ... }.
 // Throws if neither config exists or parsing fails — callers map that to HTTP.
-function parseProjectConfig(projectPath) {
+// `yamlOverride` parses that text instead of the file on disk, so an edit to
+// icp.yaml can be checked before it is written.
+function parseProjectConfig(projectPath, yamlOverride = null) {
   const dfxPath = join(projectPath, 'dfx.json');
   const icpYamlPath = join(projectPath, 'icp.yaml');
   const hasDfxJson = existsSync(dfxPath);
-  const hasIcpYaml = existsSync(icpYamlPath);
+  const hasIcpYaml = yamlOverride !== null || existsSync(icpYamlPath);
 
   if (!hasDfxJson && !hasIcpYaml) {
     throw new Error('No icp.yaml or dfx.json found in that folder');
@@ -599,7 +592,7 @@ function parseProjectConfig(projectPath) {
   // Prefer icp.yaml when both exist (modern ICP CLI format)
   if (hasIcpYaml) {
       // icp.yaml parsing: line-based parser for canisters array and environments
-      const yamlContent = readFileSync(icpYamlPath, 'utf-8');
+      const yamlContent = yamlOverride !== null ? yamlOverride : readFileSync(icpYamlPath, 'utf-8');
       const canisters = [];
       const environments = [];
       let currentCanister = null;
@@ -739,6 +732,39 @@ app.post('/api/project/info', (req, res) => {
   }
 });
 
+// Line range [start, end) of the top-level `environments:` section, or null.
+// `inline` marks a flow-style `environments: [...]`, which is not edited.
+function envSectionRange(lines) {
+  const start = lines.findIndex(l => /^environments:/.test(l));
+  if (start === -1) return null;
+  if (/^environments:\s*[^\s#]/.test(lines[start])) return { start, end: start + 1, inline: true };
+  let end = start + 1;
+  while (end < lines.length && !(/^\S/.test(lines[end]) && !lines[end].startsWith('#'))) end++;
+  return { start, end };
+}
+
+// Line range [start, end) of one `- name: <name>` entry inside that section:
+// the dash line plus every following line indented deeper than the dash
+// (blank lines included only when more of the entry follows them).
+function findEnvEntry(lines, section, name) {
+  for (let i = section.start + 1; i < section.end; i++) {
+    const m = lines[i].match(/^(\s*)-\s+name:\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/);
+    if (!m || m[2] !== name) continue;
+    const dashIndent = m[1].length;
+    let end = i + 1;
+    let lastContent = i + 1;
+    while (end < section.end) {
+      const l = lines[end];
+      if (l.trim() === '') { end++; continue; }
+      if (l.match(/^\s*/)[0].length <= dashIndent) break;
+      end++;
+      lastContent = end;
+    }
+    return { start: i, end: lastContent };
+  }
+  return null;
+}
+
 // Add or remove an environment/network in icp.yaml or dfx.json
 app.post('/api/project/network', (req, res) => {
   const { path: projectPath, action, name, config } = req.body;
@@ -756,38 +782,52 @@ app.post('/api/project/network', (req, res) => {
 
   try {
     if (hasIcpYaml) {
-      // icp.yaml: manage environments section
-      let yamlContent = readFileSync(icpYamlPath, 'utf-8');
+      // icp.yaml: manage entries of the top-level `environments:` section only.
+      // The previous whole-file regexes also matched `- name:` entries under
+      // `canisters:`, so removing an environment could delete a canister block.
+      const original = readFileSync(icpYamlPath, 'utf-8');
+      const lines = original.split('\n');
+      const section = envSectionRange(lines);
+      if (section && section.inline) {
+        return res.status(400).json({ error: 'icp.yaml declares environments on one line; edit it by hand' });
+      }
+      const entry = section ? findEnvEntry(lines, section, name) : null;
 
       if (action === 'add') {
-        // Check if environment already exists
-        if (new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*$`, 'm').test(yamlContent)) {
-          return res.status(409).json({ error: `Environment "${name}" already exists` });
-        }
-        // Append environment to the environments section, or create it
-        const envBlock = `  - name: ${name}\n    network: ic\n`;
-        if (/^environments:/m.test(yamlContent)) {
-          yamlContent = yamlContent.replace(/^(environments:)/m, `$1\n${envBlock}`);
+        if (entry) return res.status(409).json({ error: `Environment "${name}" already exists` });
+        if (section) {
+          const firstDash = lines.slice(section.start + 1, section.end).find(l => /^\s*-\s/.test(l));
+          const ind = firstDash ? firstDash.match(/^\s*/)[0] : '  ';
+          let at = section.end;
+          while (at > section.start + 1 && lines[at - 1].trim() === '') at--;
+          lines.splice(at, 0, `${ind}- name: ${name}`, `${ind}  network: ic`);
         } else {
-          yamlContent += `\nenvironments:\n${envBlock}`;
+          if (lines[lines.length - 1] === '') lines.pop();
+          lines.push('', 'environments:', `  - name: ${name}`, '    network: ic', '');
         }
       } else if (action === 'remove') {
         if (name === 'ic') return res.status(400).json({ error: 'Cannot remove the ic (production) environment' });
-        // Remove the environment entry (name line + following indented lines until next - name: or section)
-        const envRegex = new RegExp(`^\\s+-\\s+name:\\s*${name}\\s*\\n(?:\\s{4,}\\S[^\\n]*\\n)*`, 'gm');
-        const newContent = yamlContent.replace(envRegex, '');
-        if (newContent === yamlContent) return res.status(404).json({ error: `Environment "${name}" not found` });
-        yamlContent = newContent;
+        if (!entry) return res.status(404).json({ error: `Environment "${name}" not found` });
+        lines.splice(entry.start, entry.end - entry.start);
       } else {
         return res.status(400).json({ error: 'action must be "add" or "remove"' });
       }
 
+      const yamlContent = lines.join('\n');
+      // Refuse to write anything that changes more than the one environment.
+      const before = parseProjectConfig(projectPath, original);
+      const after = parseProjectConfig(projectPath, yamlContent);
+      const names = (cfg) => cfg.canisters.map(c => c.name).join('\n');
+      const envs = (cfg) => new Set(cfg.environments.map(e => e.name));
+      const expected = envs(before);
+      if (action === 'add') expected.add(name); else expected.delete(name);
+      const got = envs(after);
+      if (names(before) !== names(after) || got.size !== expected.size || [...expected].some(e => !got.has(e))) {
+        return res.status(500).json({ error: 'Refusing to write icp.yaml: the edit would change more than that one environment. Edit it by hand.' });
+      }
+
       writeFileSync(icpYamlPath, yamlContent);
-      // Re-parse to return updated network list
-      const networkSet = new Set(['local', 'ic']);
-      const envMatches = yamlContent.matchAll(/^\s+-\s+name:\s*(.+)/gm);
-      for (const m of envMatches) networkSet.add(m[1].trim().replace(/^["']|["']$/g, ''));
-      res.json({ ok: true, networks: [...networkSet] });
+      res.json({ ok: true, networks: after.networks });
     } else {
       // Legacy dfx.json: manage networks section
       const dfxJson = JSON.parse(readFileSync(dfxPath, 'utf-8'));
@@ -844,10 +884,15 @@ function parseCanisterStatus(raw) {
   const freezingMatch = raw.match(/Freezing threshold:\s*([\d_,]+)/i);
   parsed.freezingThreshold = freezingMatch ? freezingMatch[1].replace(/[_,]/g, '') : null;
 
-  const controllersMatch = raw.match(/Controllers?:\s*(.+)/i);
-  parsed.controllers = controllersMatch
-    ? controllersMatch[1].split(/\s+/).filter(Boolean).map(c => c.replace(/,+$/, ''))
-    : [];
+  // icp 1.4 prints one "controller: <principal>" line under a bare "Controllers:"
+  // heading; older icp and dfx print "Controllers: a b" on one line. Matching
+  // with \s* crossed the newline and returned "controller:" as a controller,
+  // which also made every single-controller canister count as two.
+  const perLine = [...raw.matchAll(/^[ \t]*controller:[ \t]*(\S+)/gim)].map(m => m[1]);
+  const inline = raw.match(/Controllers?:[ \t]*(\S.*)/i);
+  parsed.controllers = (perLine.length ? perLine : inline ? inline[1].split(/[\s,]+/) : [])
+    .map(c => c.replace(/,+$/, ''))
+    .filter(c => PRINCIPAL_TEXT_RE.test(c));
 
   // icp CLI extras: idle burn rate, reserved cycles
   const idleBurnMatch = raw.match(/Idle cycles burned per day:\s*([\d_,]+)/i);
@@ -904,6 +949,9 @@ app.post('/api/canisters/status-all', async (req, res) => {
   const canisterIds = readCanisterIds(projectPath);
   const results = {};
 
+  if (canisterNames != null && (!Array.isArray(canisterNames) || canisterNames.length > MAX_BATCH)) {
+    return res.status(400).json({ error: `canisterNames must be an array of at most ${MAX_BATCH}` });
+  }
   const names = (canisterNames || []).filter((name) => {
     try { assertSafeName(name, 'canister'); return true; } catch { return false; }
   });
@@ -911,7 +959,9 @@ app.post('/api/canisters/status-all', async (req, res) => {
   await mapWithConcurrency(names, 4, async (name) => {
     // Resolve the canister ID from canister_ids.json first; only fall back to the
     // CLI (an extra spawn) when the file doesn't have it.
-    const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
+    // Exact network key only: falling back to the `local` ID for a custom
+    // environment reported a local replica's canister as the staging one.
+    const idsJsonId = canisterIds[name]?.[network || 'local'] || null;
     let canisterId = idsJsonId;
     if (!canisterId) {
       const idResult = await getCanisterIdAsync(name, netArgs, projectPath);
@@ -1252,8 +1302,8 @@ app.get('/api/fleet', async (req, res) => {
 // hands the row back to the guess.
 function applyFleetTier(settings, safePath, network, canister, tier) {
   if (!settings.fleetTiers || typeof settings.fleetTiers !== 'object') settings.fleetTiers = {};
-  const byProject = settings.fleetTiers[safePath] || (settings.fleetTiers[safePath] = {});
-  const byNetwork = byProject[network] || (byProject[network] = {});
+  const byProject = ownChild(settings.fleetTiers, safePath);
+  const byNetwork = ownChild(byProject, network);
 
   const fallback = defaultFleetTier(network);
   const cleared = tier === 'default';
@@ -1357,19 +1407,18 @@ app.post('/api/canister/update-settings', (req, res) => {
     : ['canister', 'update-settings', canister, ...networkArgs(network)];
 
   if (freezingThreshold != null) {
-    const ft = String(parseInt(freezingThreshold, 10));
-    if (isNaN(parseInt(ft, 10))) return res.status(400).json({ error: 'Invalid freezing threshold' });
+    const ft = String(freezingThreshold);
+    if (!/^[0-9]+$/.test(ft)) return res.status(400).json({ error: 'Invalid freezing threshold' });
     args.push('--freezing-threshold', ft);
   }
   if (addController) {
-    // Principal IDs contain alphanumeric chars and dashes
-    if (!/^[a-z0-9\-]+$/.test(addController)) {
+    if (!PRINCIPAL_TEXT_RE.test(addController)) {
       return res.status(400).json({ error: 'Invalid controller principal' });
     }
     args.push('--add-controller', addController);
   }
   if (removeController) {
-    if (!/^[a-z0-9\-]+$/.test(removeController)) {
+    if (!PRINCIPAL_TEXT_RE.test(removeController)) {
       return res.status(400).json({ error: 'Invalid controller principal' });
     }
     args.push('--remove-controller', removeController);
@@ -1422,8 +1471,16 @@ app.post('/api/canister/top-up', rateLimit(60000, 5), async (req, res) => {
   if (network && network !== 'local') {
     try { assertSafeName(network, 'network'); } catch (e) { return res.status(400).json({ error: e.message }); }
   }
-  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
-    return res.status(400).json({ error: 'amount must be a positive number of cycles' });
+  if (!/^[0-9]+$/.test(String(amount)) || BigInt(String(amount)) <= 0n) {
+    return res.status(400).json({ error: 'amount must be a positive whole number of cycles' });
+  }
+  if (!['cycles', 'icp', undefined].includes(source)) {
+    return res.status(400).json({ error: 'source must be "cycles" or "icp"' });
+  }
+  // Minting always happens on mainnet, so paying a local canister with ICP
+  // burned real ICP and then failed the local top-up.
+  if (source === 'icp' && (!network || network === 'local')) {
+    return res.status(400).json({ error: 'Paying with ICP mints on mainnet; it cannot top up a local canister. Use the cycles balance.' });
   }
 
   const result = await performTopUp({ projectPath, canister, network, amount, source: source || 'cycles' });
@@ -1473,6 +1530,57 @@ async function getControllerIcpBalance(network, projectPath) {
   return isNaN(n) ? null : n;
 }
 
+// ICP the identity would burn to mint `cycles`, from the cycles minting
+// canister's live ICP/XDR rate (1 XDR mints 1T cycles), plus 5% and two
+// ledger fees of headroom. Returns Number or null when the rate is unreadable,
+// in which case the caller must not mint: without it the ICP reserve cannot be
+// honoured.
+const CMC = 'rkp4c-7iaaa-aaaaa-aaaca-cai';
+async function estimateIcpForCycles(cycles) {
+  if (CLI !== 'icp') return null;
+  const result = await runCliAsync(['canister', 'call', CMC, 'get_icp_xdr_conversion_rate', '()', '--query', '-n', 'ic']);
+  if (!result.ok) return null;
+  const m = result.data.match(/xdr_permyriad_per_icp\s*=\s*([\d_]+)/);
+  const permyriad = m ? Number(m[1].replace(/_/g, '')) : 0;
+  if (!permyriad) return null;
+  const cyclesPerIcp = permyriad * 1e8; // permyriad of 1T cycles
+  return (Number(cycles) / cyclesPerIcp) * 1.05 + 0.0002;
+}
+
+// Only one auto top-up pass may run on this machine at a time, across every
+// dashboard server: two servers (say one from the Dock, one from a terminal)
+// each passed their own in-memory guard and topped the same canister up twice.
+// The lock is a file created exclusively; one left behind by a dead process,
+// or older than 15 minutes, is taken over.
+const AUTOTOPUP_LOCK = join(HOME, '.canister-panel-autotopup.lock');
+function acquireAutoTopupLock() {
+  const mine = JSON.stringify({ pid: process.pid, at: Date.now() });
+  try { writeFileSync(AUTOTOPUP_LOCK, mine, { flag: 'wx' }); return true; } catch (e) {
+    if (e.code !== 'EEXIST') return false;
+  }
+  try {
+    // An unreadable lock (half-written, hand-edited) counts as stale, or it
+    // would block every future pass.
+    let held = null;
+    try { held = JSON.parse(readFileSync(AUTOTOPUP_LOCK, 'utf-8')); } catch {}
+    let alive = false;
+    if (held && Number.isInteger(held.pid) && Number.isFinite(held.at)) {
+      // ESRCH is "no such process"; EPERM means it exists but isn't ours.
+      try { process.kill(held.pid, 0); alive = true; } catch (e) { alive = e.code !== 'ESRCH'; }
+    }
+    if (alive && Date.now() - held.at < 15 * 60000) return false;
+    unlinkSync(AUTOTOPUP_LOCK);
+    writeFileSync(AUTOTOPUP_LOCK, mine, { flag: 'wx' });
+    return true;
+  } catch { return false; }
+}
+function releaseAutoTopupLock() {
+  try {
+    const held = JSON.parse(readFileSync(AUTOTOPUP_LOCK, 'utf-8'));
+    if (held.pid === process.pid) unlinkSync(AUTOTOPUP_LOCK);
+  } catch {}
+}
+
 // Register/dedupe a project in settings.autoTopupProjects so the monitor scans it.
 function registerAutoTopupProject(projectPath) {
   const settings = readSettings();
@@ -1516,6 +1624,7 @@ let monitorRunning = false;
 // Never throws — one bad project can't abort the loop. All cycle math is BigInt.
 async function runAutoTopupPass() {
   if (monitorRunning) return [];
+  if (!acquireAutoTopupLock()) return [{ action: 'skipped', reason: 'another dashboard server is already running a pass' }];
   monitorRunning = true;
   const actions = [];
   try {
@@ -1584,6 +1693,11 @@ async function runAutoTopupPass() {
             }
             if (amount <= 0n) { rec('skipped', 'cap-exhausted'); continue; }
 
+            // The owner may have turned this off or changed it while the pass
+            // was busy with earlier canisters: re-read before spending anything.
+            const freshCfg = readAutoTopup(projectPath)[network]?.[canister];
+            if (!freshCfg || !freshCfg.enabled) { rec('skipped', 'disabled-during-pass'); continue; }
+
             // Available cycles from the controller, honouring the reserve floor
             const cyclesBal = await getControllerCyclesBalance(network, projectPath);
             const availCycles = cyclesBal == null
@@ -1591,34 +1705,51 @@ async function runAutoTopupPass() {
               : (cyclesBal > reserveCycles ? cyclesBal - reserveCycles : 0n);
 
             let r;
-            let spentNow;
+            let spentNow = 0n;
             if (availCycles >= amount) {
               // Fully fundable from existing cycles
               r = await performTopUp({ projectPath, canister, network, amount, source: 'auto-cycles' });
-              spentNow = amount;
+              if (r.ok) spentNow = amount;
             } else {
-              // Cycles short — fall back to minting from ICP for the shortfall
+              // Cycles short: mint the shortfall from ICP, but only if the ICP it
+              // costs leaves the ICP reserve intact. The old check only asked
+              // whether the balance was above the reserve, so one mint could take
+              // it far below.
+              const shortfall = amount - availCycles;
               const icpBal = await getControllerIcpBalance(network, projectPath);
-              if (icpBal != null && icpBal > reserveIcp) {
-                if (availCycles > 0n) {
-                  await performTopUp({ projectPath, canister, network, amount: availCycles, source: 'auto-cycles' });
-                }
-                r = await performTopUp({ projectPath, canister, network, amount: amount - availCycles, source: 'auto-icp' });
-                spentNow = amount;
-              } else {
-                rec('skipped', 'insufficient-funds (cycles short, ICP below reserve)');
+              const icpCost = await estimateIcpForCycles(shortfall);
+              if (icpBal == null || icpCost == null) {
+                rec('skipped', 'insufficient-funds (cycles short, could not read ICP balance or rate)');
                 continue;
               }
+              if (icpBal - icpCost < reserveIcp) {
+                rec('skipped', `insufficient-funds (cycles short, minting would take ICP below the ${reserveIcp} reserve)`);
+                continue;
+              }
+              if (availCycles > 0n) {
+                const first = await performTopUp({ projectPath, canister, network, amount: availCycles, source: 'auto-cycles' });
+                if (first.ok) spentNow += availCycles;
+              }
+              r = await performTopUp({ projectPath, canister, network, amount: shortfall, source: 'auto-icp' });
+              if (r.ok) spentNow += shortfall;
             }
 
+            // Record whatever was actually spent, even if only the first half of
+            // a split top-up succeeded, so the daily cap and cooldown count it.
+            // Merge into a fresh read so config edits made during the pass survive.
+            if (spentNow > 0n) {
+              const latest = readAutoTopup(projectPath);
+              const entry = latest[network]?.[canister];
+              if (entry) {
+                entry.lastTopupAt = new Date().toISOString();
+                entry.spent = { date: today, cycles: String(spent + spentNow) };
+                writeAutoTopup(projectPath, latest);
+              }
+            }
             if (r && r.ok) {
-              cfg.lastTopupAt = new Date().toISOString();
-              cfg.spent = { date: today, cycles: String(spent + spentNow) };
-              writeAutoTopup(projectPath, data);
               rec('topped-up', 'below-threshold', String(spentNow));
             } else {
-              // Do not update runtime state on failure.
-              rec('skipped', 'topup-failed: ' + (r ? r.output : 'unknown'));
+              rec('skipped', 'topup-failed: ' + (r ? r.output : 'unknown') + (spentNow > 0n ? ` (${spentNow} cycles from the balance did go through)` : ''));
             }
           }
         }
@@ -1630,6 +1761,7 @@ async function runAutoTopupPass() {
     console.error('Auto top-up pass error:', e.message);
   } finally {
     monitorRunning = false;
+    releaseAutoTopupLock();
   }
   return actions;
 }
@@ -1930,6 +2062,9 @@ app.post('/api/deploy/summary', async (req, res) => {
   const summary = { canisters: {} };
 
   // Per-canister: deployed module hash vs local WASM hash
+  if (canisterNames != null && (!Array.isArray(canisterNames) || canisterNames.length > MAX_BATCH)) {
+    return res.status(400).json({ error: `canisterNames must be an array of at most ${MAX_BATCH}` });
+  }
   const names = (canisterNames || []).filter((name) => {
     try { assertSafeName(name, 'canister'); return true; } catch { return false; }
   });
@@ -1940,7 +2075,9 @@ app.post('/api/deploy/summary', async (req, res) => {
 
     // Resolve canister ID from canister_ids.json first; only fall back to the CLI
     // (an extra spawn) when the file doesn't have it.
-    const idsJsonId = canisterIds[name]?.[network] || canisterIds[name]?.[network === 'ic' ? 'ic' : 'local'] || null;
+    // Exact network key only: falling back to the `local` ID for a custom
+    // environment reported a local replica's canister as the staging one.
+    const idsJsonId = canisterIds[name]?.[network || 'local'] || null;
     if (idsJsonId) {
       entry.canisterId = idsJsonId;
     } else {
@@ -2029,26 +2166,11 @@ app.post('/api/deploy/summary', async (req, res) => {
     }
   }
 
-  // Write resolved canister IDs back to canister_ids.json so other machines (and CLI fallback)
-  // can resolve them after a git pull, without needing local CLI state.
-  try {
-    const idsPath = join(projectPath, 'canister_ids.json');
-    const existingIds = readCanisterIds(projectPath);
-    let changed = false;
-    for (const [name, entry] of Object.entries(summary.canisters)) {
-      if (entry.canisterId) {
-        if (!existingIds[name]) existingIds[name] = {};
-        if (existingIds[name][network] !== entry.canisterId) {
-          existingIds[name][network] = entry.canisterId;
-          changed = true;
-        }
-      }
-    }
-    if (changed) {
-      writeFileSync(idsPath, JSON.stringify(existingIds, null, 2) + '\n', 'utf-8');
-    }
-  } catch { /* non-fatal — best effort */ }
-
+  // This endpoint only reads. It used to write resolved IDs back into the
+  // project's canister_ids.json, a tracked file, so viewing a summary created
+  // uncommitted changes in the user's repo (and recorded wrong IDs when the
+  // lookup above fell back to the local one). The CLI's own ID store is the
+  // source of truth; the dashboard never edits it.
   res.json(summary);
 });
 
@@ -2166,8 +2288,8 @@ app.post('/api/fleet/ledger-watch', (req, res) => {
 
   const settings = readSettings();
   if (!settings.fleetLedgerWatch || typeof settings.fleetLedgerWatch !== 'object') settings.fleetLedgerWatch = {};
-  const byProject = settings.fleetLedgerWatch[safePath] || (settings.fleetLedgerWatch[safePath] = {});
-  const byNetwork = byProject[network] || (byProject[network] = {});
+  const byProject = ownChild(settings.fleetLedgerWatch, safePath);
+  const byNetwork = ownChild(byProject, network);
 
   if (enabled) byNetwork[canister] = true;
   else delete byNetwork[canister];
@@ -2238,18 +2360,19 @@ app.post('/api/cycles/ledger-balance', (req, res) => {
   } catch (e) { return res.status(400).json({ error: e.message }); }
   const candid = `(record { owner = principal "${canisterId}"; subaccount = null })`;
   const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
-  if (!result.ok) return res.json({ canisterId, balance: '0', error: result.data });
+  // A failed read is unknown (null), never '0': zero is a real balance.
+  if (!result.ok) return res.json({ canisterId, balance: null, error: result.data });
   // Output: "(2_850_000_000_000 : nat)"
   const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
-  const balance = match ? match[1].replace(/_/g, '') : '0';
+  const balance = match ? match[1].replace(/_/g, '') : null;
   res.json({ canisterId, balance });
 });
 
 // Batch check cycles ledger balances for multiple canisters
 app.post('/api/cycles/ledger-balances', (req, res) => {
   const { canisterIds, network, path: reqPath } = req.body;
-  if (!canisterIds || !Array.isArray(canisterIds)) {
-    return res.status(400).json({ error: 'canisterIds array required' });
+  if (!canisterIds || !Array.isArray(canisterIds) || canisterIds.length > MAX_BATCH) {
+    return res.status(400).json({ error: `canisterIds must be an array of at most ${MAX_BATCH}` });
   }
   if (!network || network === 'local') {
     return res.json(Object.fromEntries(canisterIds.map(id => [id, '0'])));
@@ -2261,14 +2384,14 @@ app.post('/api/cycles/ledger-balances', (req, res) => {
   } catch (e) { return res.status(400).json({ error: e.message }); }
   const results = {};
   for (const cid of canisterIds) {
-    if (!/^[a-z0-9\-]+$/.test(cid)) { results[cid] = '0'; continue; }
+    if (!/^[a-z0-9\-]+$/.test(cid)) { results[cid] = null; continue; }
     const candid = `(record { owner = principal "${cid}"; subaccount = null })`;
     const result = runCliSync(['canister', 'call', CYCLES_LEDGER, 'icrc1_balance_of', candid, ...netArgs], projectPath);
     if (result.ok) {
       const match = result.data.match(/\(\s*([\d_]+)\s*:\s*nat\)/);
-      results[cid] = match ? match[1].replace(/_/g, '') : '0';
+      results[cid] = match ? match[1].replace(/_/g, '') : null;
     } else {
-      results[cid] = '0';
+      results[cid] = null; // unknown, not zero
     }
   }
   res.json(results);
@@ -2449,10 +2572,15 @@ app.post('/api/replica/start', (req, res) => {
 });
 
 // Stop local replica
-app.post('/api/replica/stop', (_req, res) => {
+// `icp network stop` is project-scoped: run without the project as cwd it
+// looks in the server's own folder, fails, and the old version still told the
+// UI it had stopped.
+app.post('/api/replica/stop', (req, res) => {
+  const { path: projectPath } = req.body || {};
   const args = CLI === 'icp' ? ['network', 'stop'] : ['stop'];
-  const result = runCliSync(args);
-  res.json({ ok: result.ok, output: result.data });
+  const result = runCliSync(args, projectPath || undefined);
+  if (!result.ok) return res.status(500).json({ error: result.data || 'Could not stop the replica' });
+  res.json({ ok: true, output: result.data });
 });
 
 // Browse directory (for folder picker)
@@ -2504,7 +2632,7 @@ wss.on('connection', (ws, req) => {
   // Verify WebSocket origin — must match this server's port exactly
   const origin = req.headers.origin || '';
   const allowedWsOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
-  if (origin && !allowedWsOrigins.includes(origin)) {
+  if ((origin && !allowedWsOrigins.includes(origin)) || !allowedHost(req.headers.host)) {
     ws.close(1008, 'Forbidden: invalid origin');
     return;
   }
@@ -2514,7 +2642,7 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  ws.on('message', (raw) => {
+  const onMessage = (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -2526,25 +2654,33 @@ wss.on('connection', (ws, req) => {
     if (msg.action === 'deploy') {
       const { path: projectPath, network, canisters, identity, mode } = msg;
 
-      if (!projectPath) {
-        ws.send(JSON.stringify({ type: 'error', data: 'Project path required' }));
-        return;
-      }
-      try { assertSafePath(projectPath); } catch (e) {
-        ws.send(JSON.stringify({ type: 'error', data: e.message }));
+      // Every early exit must also send a terminal status, or the UI sits on
+      // "deploying" forever (see the WebSocket gotcha in CLAUDE.md).
+      const fail = (text) => {
+        ws.send(JSON.stringify({ type: 'error', data: text }));
+        ws.send(JSON.stringify({ type: 'status', data: 'error' }));
+      };
+
+      // Validate everything before touching the identity or building anything.
+      let netArgs;
+      try {
+        if (!projectPath) throw new Error('Project path required');
+        assertSafePath(projectPath);
+        if (canisters != null && !Array.isArray(canisters)) throw new Error('canisters must be a list');
+        for (const c of canisters || []) assertSafeName(c, 'canister');
+        if (identity) assertSafeName(identity, 'identity');
+        netArgs = networkArgs(network);
+      } catch (e) {
+        fail(e.message);
         return;
       }
 
       // Switch identity if specified
       if (identity) {
-        try { assertSafeName(identity, 'identity'); } catch (e) {
-          ws.send(JSON.stringify({ type: 'error', data: e.message }));
-          return;
-        }
         const useCmd = CLI === 'icp' ? ['identity', 'default', identity] : ['identity', 'use', identity];
         const idResult = runCliSync(useCmd);
         if (!idResult.ok) {
-          ws.send(JSON.stringify({ type: 'error', data: `Failed to switch identity: ${idResult.data}` }));
+          fail(`Failed to switch identity: ${idResult.data}`);
           return;
         }
         ws.send(JSON.stringify({ type: 'log', data: `Switched to identity: ${identity}` }));
@@ -2552,15 +2688,6 @@ wss.on('connection', (ws, req) => {
 
       // Optional: build before deploy
       if (msg.build) {
-        // Validate canister names before build
-        if (canisters && canisters.length > 0) {
-          for (const c of canisters) {
-            try { assertSafeName(c, 'canister'); } catch (e) {
-              ws.send(JSON.stringify({ type: 'error', data: e.message }));
-              return;
-            }
-          }
-        }
 
         ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} build ${(canisters || []).join(' ')}` }));
         ws.send(JSON.stringify({ type: 'status', data: 'building' }));
@@ -2588,20 +2715,12 @@ wss.on('connection', (ws, req) => {
 
       // Build deploy command
       const args = ['deploy'];
-      if (canisters && canisters.length > 0) {
-        for (const c of canisters) {
-          try { assertSafeName(c, 'canister'); } catch (e) {
-            ws.send(JSON.stringify({ type: 'error', data: e.message }));
-            return;
-          }
-        }
-        args.push(...canisters);
-      }
+      if (canisters && canisters.length > 0) args.push(...canisters);
       // Deploy mode (upgrade, reinstall, install)
       if (mode && ['upgrade', 'reinstall', 'install'].includes(mode)) {
         args.push('--mode', mode);
       }
-      args.push(...networkArgs(network));
+      args.push(...netArgs);
 
       ws.send(JSON.stringify({ type: 'log', data: `> ${CLI} ${args.join(' ')}` }));
       ws.send(JSON.stringify({ type: 'status', data: 'deploying' }));
@@ -2649,7 +2768,7 @@ wss.on('connection', (ws, req) => {
           const deployedNames = (canisters && canisters.length > 0) ? canisters : [];
           for (const name of deployedNames) {
             // Fetch the module hash of the just-deployed canister
-            const statusResult = runCliSync(['canister', 'status', name, ...networkArgs(network)], projectPath);
+            const statusResult = runCliSync(['canister', 'status', name, ...netArgs], projectPath);
             let moduleHash = null;
             if (statusResult.ok) {
               const hashMatch = statusResult.data.match(/Module hash:\s*(0x[a-f0-9]+|None)/i);
@@ -2691,7 +2810,7 @@ wss.on('connection', (ws, req) => {
               const detail = assetMatch[1] ? `Problem file: ${assetMatch[1]}` : (assetMatch[2] || '');
               if (detail) ws.send(JSON.stringify({ type: 'log', data: `    ${detail}` }));
             }
-            ws.send(JSON.stringify({ type: 'log', data: `    Try: icp deploy ${name} ${networkArgs(network).join(' ')}` }));
+            ws.send(JSON.stringify({ type: 'log', data: `    Try: icp deploy ${name} ${netArgs.join(' ')}` }));
           }
           for (const name of failedInstall) {
             ws.send(JSON.stringify({ type: 'log', data: `  ✗ ${name} — failed to install` }));
@@ -2716,12 +2835,7 @@ wss.on('connection', (ws, req) => {
 
       child.on('error', (err) => {
         ws.removeListener('message', onCancel);
-        ws.send(
-          JSON.stringify({
-            type: 'error',
-            data: `Spawn error: ${err.message}`,
-          })
-        );
+        fail(`Spawn error: ${err.message}`);
       });
     }
 
@@ -2778,16 +2892,43 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'status', data: 'replica-error' }));
       });
     }
+  };
+
+  // A synchronous throw in an event listener would take the whole server down.
+  ws.on('message', (raw) => {
+    try { onMessage(raw); } catch (e) {
+      console.error('WebSocket handler error:', e.message);
+      ws.send(JSON.stringify({ type: 'error', data: e.message }));
+      ws.send(JSON.stringify({ type: 'status', data: 'error' }));
+    }
   });
 });
 
 // ---------- Settings persistence ----------
 
+// obj[key] as a nested settings object, created if absent. Only an OWN plain
+// object counts: a network or canister named "constructor" otherwise resolved
+// to Object itself, and the write that followed landed on a built-in.
+function ownChild(obj, key) {
+  const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  return (obj[key] = {});
+}
+
 const SETTINGS_FILE = join(HOME, '.canister-panel-settings.json');
 
 function readSettings() {
   if (!existsSync(SETTINGS_FILE)) return {};
-  try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8')); } catch { return {}; }
+  let text;
+  try { text = readFileSync(SETTINGS_FILE, 'utf-8'); } catch { return {}; }
+  try { return JSON.parse(text); } catch {
+    // Unparseable: keep a copy before the next write replaces it, so a bad
+    // edit costs a restore rather than every Fleet classification and setting.
+    const backup = `${SETTINGS_FILE}.corrupt`;
+    try { if (!existsSync(backup)) writeFileSync(backup, text); } catch {}
+    console.error(`Settings file is not valid JSON; a copy was saved to ${backup}`);
+    return {};
+  }
 }
 
 function writeSettings(settings) {
@@ -2830,9 +2971,20 @@ app.post('/api/settings/add-project', (req, res) => {
 });
 
 // Global error handler — catch unhandled route errors, never leak stack traces
-app.use((err, _req, res, _next) => {
+app.use((err, _req, res, next) => {
+  if (res.headersSent) return next(err);
+  // body-parser and friends set a 4xx status (bad JSON, body too large): keep it.
+  if (err.status >= 400 && err.status < 500) {
+    return res.status(err.status).json({ error: err.expose ? err.message : 'Bad request' });
+  }
   console.error('Unhandled error:', err.message);
   res.status(500).json({ error: 'Internal server error' });
+});
+
+// Last line of defence: log and keep serving. A crash here would also stop the
+// auto top-up monitor without anyone noticing.
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err && err.message ? err.message : err);
 });
 
 // ---------- start ----------

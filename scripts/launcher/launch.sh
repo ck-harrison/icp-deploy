@@ -92,7 +92,7 @@ cd "$REPO" || { alert "Could not enter ${REPO}."; exit 1; }
 # Truncated per launch, not appended: one run's worth of log is what's useful,
 # and *.log is gitignored so this leaves no diff.
 : > "$LOG"
-# PORT is what server.js reads (server.js:2478); ICP_DEPLOY_PORT is only this
+# PORT is what server.js reads (its `const PORT`); ICP_DEPLOY_PORT is only this
 # script's way of being told about it. Passing one without the other is the bug
 # this comment exists to prevent: the launcher polls its port while the server
 # listens on the default one, and the launch times out on a healthy server.

@@ -209,6 +209,9 @@
     // ---- Confirmation Modal ----
     function ConfirmModal({ isOpen, title, message, danger, onConfirm, onCancel, confirmPhrase }) {
       const [typed, setTyped] = React.useState('');
+      // The App-level modal stays mounted between uses, so clear the phrase or
+      // the next dangerous action would open already confirmed.
+      React.useEffect(() => { setTyped(''); }, [isOpen, title]);
       if (!isOpen) return null;
       const phraseMatch = !confirmPhrase || typed === confirmPhrase;
       return (
@@ -258,7 +261,7 @@
           'Deploy: tick the canisters to deploy, choose a mode, and watch the build output live. Auto picks install or upgrade for you. Upgrade keeps your data. Reinstall wipes it.',
           'Canisters: cycles, memory, status and controllers for each canister, plus Top Up, Stop, Start and Delete.',
           'Snapshots: save and restore a copy of a canister\'s state. The dashboard stops and restarts the canister for you.',
-          'Fleet: every canister across all your recent projects in one place, split into Production and Staging. You decide which column each canister goes in.',
+          'Fleet: every canister across all your recent projects in one place, split into Production and Staging. You decide which column each canister goes in. Fleet covers every network at once, so the network switch is hidden there.',
         ],
       },
       {
@@ -274,8 +277,9 @@
         title: 'Safety',
         items: [
           'Every mainnet deploy asks for confirmation. Reinstall and Delete make you type a phrase first, because they destroy data.',
-          'The dashboard only listens on this computer (127.0.0.1). Never expose its port to a network: it can spend your cycles and export your keys.',
-          'It uses your normal icp CLI identities. Nothing is sent anywhere except the Internet Computer itself.',
+          'The dashboard only listens on this computer (127.0.0.1). Never expose its port to a network: it can spend your cycles and delete your canisters.',
+          "It uses your normal icp CLI identities and never handles private keys. Create, import and export identities in the terminal. There is no telemetry: the dashboard only talks to the Internet Computer, the public CDNs that serve this page's code, and (for Fleet's \"behind\" check) your projects' git remotes.",
+          'Switching identity here changes the default for the icp CLI on your whole machine, including your terminal.',
         ],
       },
       {
@@ -868,6 +872,9 @@
       if (!isOpen) return null;
 
       const isMainnet = network === 'ic';
+      // A staging environment usually targets mainnet too (see CLAUDE.md), so
+      // anything that is not the local replica gets the live-network warning.
+      const isLive = network !== 'local';
       const stepContent = {
         1: {
           title: 'DANGER: Reinstall Mode Selected',
@@ -894,11 +901,17 @@
             <div className="space-y-3">
               <p className="text-sm text-gray-400">
                 You are about to reinstall <span className="text-white font-semibold">{canisterCount} canister(s)</span>
-                {isMainnet && <span className="text-red-400 font-semibold"> on MAINNET</span>}.
+                {isMainnet && <span className="text-red-400 font-semibold"> on MAINNET</span>}
+                {isLive && !isMainnet && <span className="text-red-400 font-semibold"> in the "{network}" environment</span>}.
               </p>
               {isMainnet && (
                 <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
                   <p className="text-sm text-red-300 font-semibold">This is a PRODUCTION environment. Real users may be affected.</p>
+                </div>
+              )}
+              {isLive && !isMainnet && (
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                  <p className="text-sm text-red-300 font-semibold">This is not your local replica. Staging environments usually run on mainnet, so this data is likely real and cannot be recovered.</p>
                 </div>
               )}
               <p className="text-sm text-gray-400">This action is <span className="text-red-400 font-semibold">irreversible</span>. No backup will be created automatically. If you have not taken a snapshot, your data is gone.</p>
@@ -936,7 +949,7 @@
             <div className="space-y-3">
               <div className="p-4 bg-red-500/15 border-2 border-red-500/40 rounded-lg text-center">
                 <p className="text-red-400 font-bold text-base">ALL DATA WILL BE PERMANENTLY DESTROYED</p>
-                <p className="text-red-300/80 text-sm mt-1">{canisterCount} canister(s){isMainnet ? ' on MAINNET' : ''}</p>
+                <p className="text-red-300/80 text-sm mt-1">{canisterCount} canister(s){isMainnet ? ' on MAINNET' : isLive ? ` in "${network}"` : ''}</p>
               </div>
               <p className="text-sm text-gray-500 text-center">Click the button below to execute the reinstall. This is your last chance to cancel.</p>
             </div>
@@ -1007,16 +1020,26 @@
       const [canisterStatus, setCanisterStatus] = useState(null); // 'Running' | 'Stopped' | null
       const [metadata, setMetadata] = useState(null);
 
-      // Auto-select first canister
+      // Auto-select the first canister, and re-select when the project changes
+      // under us: keeping a name the new project doesn't have left the tab
+      // querying a canister that isn't in the list.
       useEffect(() => {
-        if (canisters.length > 0 && !selectedCanister) {
+        if (canisters.length === 0) { setSelectedCanister(''); return; }
+        if (!canisters.some((c) => c.name === selectedCanister)) {
           setSelectedCanister(canisters[0].name);
+          setSnapshots([]);
+          setMetadata(null);
         }
       }, [canisters]);
+
+      // Each fetch gets a number; a response for an older canister or network
+      // (the user switched while it was in flight) is dropped, not shown.
+      const fetchSeq = useRef(0);
 
       // Fetch snapshots + status when canister changes
       const fetchSnapshots = useCallback(async () => {
         if (!selectedCanister || !projectPath) return;
+        const seq = ++fetchSeq.current;
         setLoading(true);
         setMessage(null);
         try {
@@ -1024,6 +1047,7 @@
             api.post('/api/canister/snapshots', { path: projectPath, canister: selectedCanister, network }),
             api.post('/api/canister/status', { path: projectPath, canister: selectedCanister, network }),
           ]);
+          if (seq !== fetchSeq.current) return;
           if (snapData.error) {
             const notDeployed = snapData.error.includes('Cannot find canister id');
             setMessage({ type: notDeployed ? 'warn' : 'error', text: notDeployed ? `Not deployed on ${network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network} — deploy first to use snapshots.` : snapData.error });
@@ -1033,6 +1057,7 @@
           }
           setCanisterStatus(statusData.runningStatus || null);
         } catch (e) {
+          if (seq !== fetchSeq.current) return;
           setMessage({ type: 'error', text: e.message });
         }
         setLoading(false);
@@ -2677,8 +2702,9 @@
               if (s.cli) setReplicaCli(s.cli);
               if (s.port) setReplicaPort(s.port);
             }).catch(() => {});
-            fetchTopupHistory();
-            fetchAutoTopUpConfig();
+            // Top-up history and auto top-up config load from the effect keyed
+            // on projectLoadCount below: called from here they were the
+            // first-render closures with an empty projectPath, so they never loaded.
             // Set available networks from project config
             const nets = data.networks && data.networks.length > 0 ? data.networks : ['local', 'ic'];
             if (!nets.includes('local')) nets.unshift('local');
@@ -2716,12 +2742,22 @@
             network,
             canisterNames: ownedCanisters.map((c) => c.name),
           });
+          // The network switched while this was in flight: its answer is for the old one.
+          if (networkRef.current !== network) return;
           setDeploySummary(data);
         } catch (e) {
+          if (networkRef.current !== network) return;
           setDeploySummary({ error: e.message });
         }
         setSummaryLoading(false);
       }, [projectPath, projectLoaded, network, canisters]);
+
+      useEffect(() => {
+        if (projectLoadCount > 0) {
+          fetchTopupHistory();
+          fetchAutoTopUpConfig();
+        }
+      }, [projectLoadCount]);
 
       // Pre-load both summary and canister statuses when project loads or network changes
       useEffect(() => {
@@ -2755,6 +2791,7 @@
           );
         };
 
+        let finished = false;
         ws.onmessage = (event) => {
           let msg;
           try { msg = JSON.parse(event.data); } catch { return; }
@@ -2762,6 +2799,8 @@
             setLogs((prev) => [...prev, { type: 'log', text: msg.data }]);
           } else if (msg.type === 'status') {
             if (['success', 'error', 'cancelled'].includes(msg.data)) {
+              if (finished) return;
+              finished = true;
               setDeployStatus(msg.data);
               ws.close();
               fetchDeploySummary();
@@ -2775,11 +2814,22 @@
         };
 
         ws.onerror = () => {
+          if (finished) return;
+          finished = true;
           setDeployStatus('error');
           setLogs((prev) => [...prev, { type: 'error', text: 'WebSocket connection failed' }]);
           ws.close();
         };
-      }, [projectPath, network, selectedCanisters, selectedIdentity, canisters, deployMode]);
+        // A clean close from the server (for example "Too many connections")
+        // fires no onerror, so without this the button would stay on Deploying.
+        ws.onclose = (event) => {
+          if (finished) return;
+          finished = true;
+          setDeployStatus('error');
+          setLogs((prev) => [...prev, { type: 'error', text: `Connection closed before the deploy finished${event.reason ? `: ${event.reason}` : ''}` }]);
+          addToast('Deploy connection closed, check logs', 'error');
+        };
+      }, [projectPath, network, selectedCanisters, selectedIdentity, canisters, deployMode, buildBeforeDeploy, addToast]);
 
       // Deploy with confirmation for mainnet / reinstall
       const deploy = useCallback(() => {
@@ -2817,6 +2867,18 @@
       // useCallback and would read a stale `replicaStarting` (see the stale-closure
       // gotcha in CLAUDE.md). The state exists only to disable the buttons.
       const replicaStartingRef = useRef(false);
+      const stopReplica = useCallback(async () => {
+        try {
+          await api.post('/api/replica/stop', { path: projectPath });
+          setReplicaRunning(false);
+          setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]);
+        } catch (e) {
+          setLogs((prev) => [...prev, { type: 'error', text: `Could not stop the replica: ${e.message}` }]);
+          addToast('Could not stop the replica, see logs', 'error');
+        }
+        refreshReplicaStatus();
+      }, [projectPath, addToast, refreshReplicaStatus]);
+
       const startReplica = useCallback(() => {
         if (replicaStartingRef.current) return;
         replicaStartingRef.current = true;
@@ -2923,6 +2985,7 @@
             network,
             canisterNames: owned.map((c) => c.name),
           });
+          if (networkRef.current !== network) { setLoadingStatuses(false); return; }
           setCanisterStatuses(data);
           // Fetch cycles ledger balances for canisters that have IDs (non-local only)
           if (network && network !== 'local') {
@@ -2930,7 +2993,7 @@
             if (ids.length > 0) {
               try {
                 const ledgerData = await api.post('/api/cycles/ledger-balances', { canisterIds: ids, network, path: projectPath });
-                setCyclesLedgerBalances(ledgerData);
+                if (networkRef.current === network) setCyclesLedgerBalances(ledgerData);
               } catch { /* non-critical */ }
             }
           }
@@ -2950,20 +3013,28 @@
       const canisterAction = useCallback(async (action, canisterName) => {
         setCanisterStatuses((prev) => ({ ...prev, [canisterName]: { ...prev[canisterName], loading: true } }));
         try {
-          await api.post(`/api/canister/${action}`, {
+          const result = await api.post(`/api/canister/${action}`, {
             path: projectPath,
             canister: canisterName,
             network,
           });
+          // These endpoints answer 200 with ok:false when the CLI fails, so
+          // check it: ignoring it made a failed stop or delete look like nothing happened.
+          if (result && result.ok === false) {
+            addToast(`Could not ${action} ${canisterName}: ${result.output || 'unknown error'}`, 'error');
+          } else {
+            addToast(`${canisterName}: ${action} done`, 'success');
+          }
           // Re-fetch status after action
           await fetchCanisterStatus(canisterName);
         } catch (e) {
+          addToast(`Could not ${action} ${canisterName}: ${e.message}`, 'error');
           setCanisterStatuses((prev) => ({
             ...prev,
             [canisterName]: { ...prev[canisterName], error: e.message, loading: false },
           }));
         }
-      }, [projectPath, network, fetchCanisterStatus]);
+      }, [projectPath, network, fetchCanisterStatus, addToast]);
 
       const stopCanister = useCallback((name) => {
         setConfirmModal({
@@ -3224,7 +3295,7 @@
                     <button onClick={startReplica} disabled={replicaStarting} className="text-[10px] px-1.5 py-0.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded hover:bg-green-500/20 disabled:opacity-40 transition-colors font-medium">{replicaStarting ? 'Starting...' : 'Start'}</button>
                   )}
                   {replicaRunning && (
-                    <button onClick={async () => { await api.post('/api/replica/stop'); setReplicaRunning(false); setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]); }} className="text-[10px] px-1.5 py-0.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors font-medium">Stop</button>
+                    <button onClick={stopReplica} className="text-[10px] px-1.5 py-0.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors font-medium">Stop</button>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -3327,8 +3398,13 @@
                   </button>
                 ))}
               </div>
+              {/* Fleet scans every network itself, so the network switch and the
+                  per-project Open App link have nothing to act on there. */}
+              {tab === 'fleet' && (
+                <span className="text-xs text-gray-500">Fleet shows every network at once</span>
+              )}
               {/* Open App link (live on ic, local replica otherwise) */}
-              {(network === 'ic' || network === 'local') && (() => {
+              {tab !== 'fleet' && (network === 'ic' || network === 'local') && (() => {
                 const fc = canisters.find(c => c.type === 'assets' || c.name.includes('frontend') || c.name.includes('asset'));
                 if (!fc) return null;
                 // Try deploy summary first (available on Deploy tab), then canister statuses
@@ -3367,6 +3443,7 @@
                 );
               })()}
               {/* Global network selector */}
+              {tab !== 'fleet' && (
               <div className="flex items-center gap-2">
                 <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700">
                   {availableNetworks.map((n) => {
@@ -3446,6 +3523,7 @@
                   </button>
                 )}
               </div>
+              )}
             </div>
 
             {/* Non-local network warning — shown on deploy tab */}
@@ -3489,30 +3567,6 @@
                           </option>
                         ))}
                       </select>
-                      <button
-                        onClick={async () => {
-                          const name = prompt('New identity name:');
-                          if (!name || !name.trim()) return;
-                          try {
-                            const data = await api.post('/api/identity/new', { name: name.trim() });
-                            if (data.seed) {
-                              alert('Identity created. Save your seed phrase:\\n\\n' + data.seed);
-                            }
-                            // Refresh identities and switch to new one
-                            const idData = await api.get('/api/identities');
-                            setIdentities(idData.identities || []);
-                            setSelectedIdentity(name.trim());
-                            await api.post('/api/identity/use', { name: name.trim() });
-                            fetchPrincipal();
-                            fetchIcpBalance();
-                            fetchCyclesBalance();
-                          } catch (err) {
-                            alert('Failed to create identity: ' + (err.message || err));
-                          }
-                        }}
-                        className="bg-surface-800 border border-surface-700 rounded-xl px-3 py-3 text-gray-400 hover:text-white hover:border-icp-500 transition-colors text-lg"
-                        title="Create new identity"
-                      >+</button>
                     </div>
                     <div className="flex gap-2 mt-2">
                       <button
@@ -3523,8 +3577,9 @@
                           try {
                             const data = await api.post('/api/identity/rename', { oldName: selectedIdentity, newName: newName.trim() });
                             if (data.error) { alert(data.error); return; }
+                            // /api/identities returns a bare array, not { identities }
                             const idData = await api.get('/api/identities');
-                            setIdentities(idData.identities || []);
+                            if (Array.isArray(idData)) setIdentities(idData);
                             setSelectedIdentity(newName.trim());
                           } catch (err) {
                             alert('Rename failed: ' + (err.message || err));
@@ -3533,59 +3588,10 @@
                         className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
                         title="Rename identity"
                       >Rename</button>
-                      <button
-                        onClick={async () => {
-                          if (!selectedIdentity) return;
-                          try {
-                            const data = await api.post('/api/identity/export', { name: selectedIdentity });
-                            if (data.error) { alert(data.error); return; }
-                            const blob = new Blob([data.pem], { type: 'text/plain' });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = selectedIdentity + '.pem';
-                            a.click();
-                            URL.revokeObjectURL(url);
-                          } catch (err) {
-                            alert('Export failed: ' + (err.message || err));
-                          }
-                        }}
-                        className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
-                        title="Export identity PEM"
-                      >Export</button>
-                      <button
-                        onClick={async () => {
-                          const input = document.createElement('input');
-                          input.type = 'file';
-                          input.accept = '.pem';
-                          input.onchange = async (e) => {
-                            const file = e.target.files[0];
-                            if (!file) return;
-                            const name = prompt('Name for imported identity:', file.name.replace('.pem', ''));
-                            if (!name || !name.trim()) return;
-                            const pem = await file.text();
-                            try {
-                              const data = await api.post('/api/identity/import', { name: name.trim(), pem });
-                              if (data.error) { alert(data.error); return; }
-                              // Refresh identities and switch
-                              const idData = await api.get('/api/identities');
-                              setIdentities(idData.identities || []);
-                              setSelectedIdentity(name.trim());
-                              await api.post('/api/identity/use', { name: name.trim() });
-                              fetchPrincipal();
-                              fetchIcpBalance();
-                              fetchCyclesBalance();
-                              alert('Identity "' + name.trim() + '" imported successfully.');
-                            } catch (err) {
-                              alert('Import failed: ' + (err.message || err));
-                            }
-                          };
-                          input.click();
-                        }}
-                        className="flex-1 text-xs bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-gray-400 hover:text-white hover:border-icp-500 transition-colors"
-                        title="Import identity from PEM file"
-                      >Import</button>
                     </div>
+                    <p className="mt-2 text-[11px] text-gray-500">
+                      To create, import or export an identity, use the terminal: <span className="font-mono">icp identity new</span>, <span className="font-mono">import</span> or <span className="font-mono">export</span>. The dashboard never handles private keys.
+                    </p>
                     {principal && (
                       <div className="mt-2 flex items-center gap-1.5">
                         <p className="text-[11px] text-gray-500 font-mono truncate flex-1" title={principal}>
@@ -3767,11 +3773,7 @@
                           {replicaStarting ? <><SpinnerIcon className="w-4 h-4" /> Starting...</> : 'Start'}
                         </button>
                         <button
-                          onClick={async () => {
-                            await api.post('/api/replica/stop');
-                            setReplicaRunning(false);
-                            setLogs((prev) => [...prev, { type: 'info', text: 'Replica stopped' }]);
-                          }}
+                          onClick={stopReplica}
                           disabled={!replicaRunning}
                           className="flex-1 py-2.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded-xl text-sm font-medium hover:bg-red-500/20 disabled:opacity-40 transition-colors"
                         >
@@ -4182,7 +4184,7 @@
                               {hasLedgerBalance && (
                                 <div className="flex items-center gap-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
-                                  <span className="text-[11px] text-amber-300">{formatCycles(ledgerBal)} cycles held on the cycles ledger under this canister's principal — consider withdrawing or using them</span>
+                                  <span className="text-[11px] text-amber-300">{formatCycles(ledgerBal)} cycles held on the cycles ledger under this canister's principal. Only code inside the canister can move them, and they are lost if the canister is deleted.</span>
                                 </div>
                               )}
                               {notMine && (
@@ -4335,6 +4337,7 @@
             title={confirmModal?.title || ''}
             message={confirmModal?.message || ''}
             danger={confirmModal?.danger || false}
+            confirmPhrase={confirmModal?.confirmPhrase}
             onConfirm={confirmModal?.onConfirm || (() => {})}
             onCancel={() => setConfirmModal(null)}
           />
