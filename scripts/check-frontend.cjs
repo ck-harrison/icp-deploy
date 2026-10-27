@@ -35,11 +35,14 @@ const CACHE_DIR = path.join(ROOT, '.cache');
 // Cached as .cjs, not .js: package.json declares "type": "module", so a .js
 // file here is loaded as an ES module and the UMD bundle's module.exports
 // assignment never happens, leaving Babel.transform undefined.
-const BABEL = path.join(CACHE_DIR, 'babel.min.cjs');
-// Must stay pinned to @7: Babel 8 changed the default sourceType to 'module',
+// Must stay on 7.x: Babel 8 changed the default sourceType to 'module',
 // which makes the transpiler emit `import` statements into a non-module script
-// context. Same pin as the <script src> in public/index.html.
-const BABEL_URL = 'https://unpkg.com/@babel/standalone@7/babel.min.js';
+// context. Must also be the exact build the page loads; the check below fails
+// if public/index.html's <script src> differs. The version is in the cache
+// file name so a bump never reuses the old build.
+const BABEL_VERSION = '7.29.11';
+const BABEL_URL = `https://unpkg.com/@babel/standalone@${BABEL_VERSION}/babel.min.js`;
+const BABEL = path.join(CACHE_DIR, `babel-${BABEL_VERSION}.min.cjs`);
 
 // Repo-relative for files inside the repo, absolute for anything outside, so a
 // canary run against an external copy is unmistakably not the real page.
@@ -89,6 +92,12 @@ function fetchBabel() {
     process.exit(2); // could not run, which is not a pass
   }
   const html = fs.readFileSync(PAGE, 'utf-8');
+  // The page must load the same Babel this check compiles with, or a pass here
+  // says nothing about what the browser does.
+  if (!html.includes(`src="${BABEL_URL}"`)) {
+    console.error(`FAIL: ${label(PAGE)} does not load ${BABEL_URL}; keep its <script src> and BABEL_VERSION in scripts/check-frontend.cjs in step.`);
+    process.exit(1);
+  }
   const m = html.match(/<script type="text\/babel">([\s\S]*?)<\/script>/);
   if (!m) {
     console.error(`FAIL: no <script type="text/babel"> block found in ${label(PAGE)}`);

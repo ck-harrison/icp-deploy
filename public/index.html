@@ -5,30 +5,66 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ICP Deploy</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
+  <!-- Exact versions with integrity hashes: the browser refuses a file that
+       has changed. Tailwind's CDN sends no CORS header, so it can only be
+       pinned, not hashed (see SECURITY.md). -->
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.11/babel.min.js" integrity="sha384-WLl8kKG54INe3zxB+zrpQr6Z1cgCoBg+ZirrqnCcjzA5sjvtSirQ11bgyU91deI+" crossorigin="anonymous"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
       theme: {
         extend: {
+          // One neutral scale and one accent. The default green, yellow and
+          // blue are remapped to quieter tones so status colours read as
+          // signals rather than decoration.
           colors: {
-            icp: { 50: '#f0f4ff', 100: '#dbe4ff', 200: '#bac8ff', 400: '#748ffc', 500: '#4c6ef5', 600: '#3b5bdb', 700: '#364fc7', 800: '#1e3a8a', 900: '#0f172a' },
-            surface: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 700: '#334155', 800: '#1e293b', 900: '#0f172a', 950: '#020617' }
-          }
+            icp: { 50: '#eef0ff', 100: '#e0e4ff', 200: '#c3cbfe', 300: '#a5b1fc', 400: '#8592f7', 500: '#6672ee', 600: '#5159dc', 700: '#4347bd', 800: '#2f328c', 900: '#1c1e4f' },
+            surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7', 600: '#3a3a42', 700: '#2a2a31', 800: '#1b1b20', 900: '#131317', 950: '#0b0b0d' },
+            blue: { 300: '#a5b1fc', 400: '#8592f7', 500: '#6672ee', 600: '#5159dc' },
+            green: { 300: '#86d9b4', 400: '#4cc790', 500: '#2fae76', 600: '#23905f' },
+            yellow: { 300: '#f2d28a', 400: '#e8b949', 500: '#d39d22', 600: '#b07f12' },
+          },
+          borderRadius: { lg: '0.4rem', xl: '0.55rem', '2xl': '0.75rem' },
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"SF Pro Text"', '"Segoe UI"', 'Roboto', 'sans-serif'],
+            mono: ['"SF Mono"', '"JetBrains Mono"', 'Menlo', 'Consolas', 'monospace'],
+          },
         }
       }
     }
   </script>
   <style>
-    body { background: #0f172a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-    .log-container { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
-    .log-container::-webkit-scrollbar { width: 6px; }
-    .log-container::-webkit-scrollbar-track { background: transparent; }
-    .log-container::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-    @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(76, 110, 245, 0.4); } 50% { box-shadow: 0 0 12px 4px rgba(76, 110, 245, 0.2); } }
+    body {
+      background: #0b0b0d;
+      color: #e4e4e7;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-feature-settings: 'cv11', 'ss01';
+      font-variant-numeric: tabular-nums; /* figures line up in every column */
+      letter-spacing: -0.003em;
+    }
+    h1, h2, h3, h4 { letter-spacing: -0.012em; }
+    ::selection { background: rgba(102, 114, 238, 0.35); }
+    /* Hairline borders read sleeker than full-strength ones on a dark ground. */
+    .border-surface-700 { border-color: rgba(255, 255, 255, 0.075) !important; }
+    .border-surface-600 { border-color: rgba(255, 255, 255, 0.12) !important; }
+    .divide-surface-700 > * + * { border-color: rgba(255, 255, 255, 0.06) !important; }
+    button, a { transition-property: color, background-color, border-color, opacity, box-shadow; transition-duration: 150ms; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid rgba(133, 146, 247, 0.7); outline-offset: 2px;
+    }
+    input::placeholder { color: #5b5b66; }
+    input[type="checkbox"], input[type="radio"] { accent-color: #6672ee; }
+    .log-container { font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 12.5px; line-height: 1.6; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2a31; border-radius: 8px; border: 3px solid #0b0b0d; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a42; }
+    @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.35); } 50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12); } }
     .deploying { animation: pulse-glow 2s ease-in-out infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner { animation: spin 1s linear infinite; }
@@ -107,6 +143,7 @@
 
     // ---- Folder Browser Modal ----
     function FolderBrowser({ isOpen, onClose, onSelect }) {
+      useEscapeToClose(isOpen, onClose);
       const [currentPath, setCurrentPath] = useState('');
       const [entries, setEntries] = useState([]);
       const [loading, setLoading] = useState(false);
@@ -130,11 +167,11 @@
       if (!isOpen) return null;
 
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-lg shadow-2xl">
             <div className="p-4 border-b border-surface-700 flex items-center justify-between">
               <h3 className="text-white font-semibold">Select Project Folder</h3>
-              <button onClick={onClose} className="text-gray-400 hover:text-white text-xl">&times;</button>
+              <button onClick={onClose} aria-label="Close" className="text-gray-400 hover:text-white text-xl">&times;</button>
             </div>
             <div className="p-3 bg-surface-950 border-b border-surface-700">
               <div className="flex items-center gap-2 text-sm text-gray-400 font-mono">
@@ -206,8 +243,20 @@
       );
     }
 
+    // Escape closes whichever dialog is open. Called first thing in every
+    // modal, before its `if (!isOpen) return null`, so hook order never changes.
+    function useEscapeToClose(isOpen, onClose) {
+      useEffect(() => {
+        if (!isOpen || !onClose) return;
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [isOpen, onClose]);
+    }
+
     // ---- Confirmation Modal ----
     function ConfirmModal({ isOpen, title, message, danger, onConfirm, onCancel, confirmPhrase }) {
+      useEscapeToClose(isOpen, onCancel);
       const [typed, setTyped] = React.useState('');
       // The App-level modal stays mounted between uses, so clear the phrase or
       // the next dangerous action would open already confirmed.
@@ -215,7 +264,7 @@
       if (!isOpen) return null;
       const phraseMatch = !confirmPhrase || typed === confirmPhrase;
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="p-5">
               <h3 className={`text-base font-semibold ${danger ? 'text-red-400' : 'text-white'} mb-2`}>{title}</h3>
@@ -260,7 +309,7 @@
         items: [
           'Deploy: tick the canisters to deploy, choose a mode, and watch the build output live. Auto picks install or upgrade for you. Upgrade keeps your data. Reinstall wipes it.',
           'Canisters: cycles, memory, status and controllers for each canister, plus Top Up, Stop, Start and Delete.',
-          'Snapshots: save and restore a copy of a canister\'s state. The dashboard stops and restarts the canister for you.',
+          'Snapshots: save and restore a copy of a canister\'s state. Creating one stops and restarts the canister for you; to restore or upload, stop the canister first on the Canisters tab.',
           'Fleet: every canister across all your recent projects in one place, split into Production and Staging. You decide which column each canister goes in. Fleet covers every network at once, so the network switch is hidden there.',
         ],
       },
@@ -276,7 +325,7 @@
       {
         title: 'Safety',
         items: [
-          'Every mainnet deploy asks for confirmation. Reinstall and Delete make you type a phrase first, because they destroy data.',
+          'Every mainnet deploy asks for confirmation. Reinstall, Delete, and restoring a snapshot outside Local make you type a phrase first, because they destroy data. Minting asks twice, because it spends ICP.',
           'The dashboard only listens on this computer (127.0.0.1). Never expose its port to a network: it can spend your cycles and delete your canisters.',
           "It uses your normal icp CLI identities and never handles private keys. Create, import and export identities in the terminal. There is no telemetry: the dashboard only talks to the Internet Computer, the public CDNs that serve this page's code, and (for Fleet's \"behind\" check) your projects' git remotes.",
           'Switching identity here changes the default for the icp CLI on your whole machine, including your terminal.',
@@ -295,9 +344,10 @@
     ];
 
     function HelpModal({ isOpen, onClose }) {
+      useEscapeToClose(isOpen, onClose);
       if (!isOpen) return null;
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="p-5 border-b border-surface-700 flex items-center justify-between">
               <h3 className="text-base font-semibold text-white">Help</h3>
@@ -325,16 +375,19 @@
 
     // ---- Controllers Modal ----
     function ControllersModal({ isOpen, canisterName, controllers, principal, projectPath, network, onDone, onClose }) {
+      useEscapeToClose(isOpen, onClose);
       const [newPrincipal, setNewPrincipal] = useState('');
       const [busy, setBusy] = useState(null); // 'add' | principal-being-removed
       const [error, setError] = useState(null);
       const [confirmRemove, setConfirmRemove] = useState(null); // principal to remove
+      // Start clean for each canister: a pending "Remove?" must not carry over.
+      useEffect(() => { setConfirmRemove(null); setNewPrincipal(''); setError(null); }, [isOpen, canisterName]);
 
       if (!isOpen) return null;
 
       const handleAdd = async () => {
         const p = newPrincipal.trim();
-        if (!p || !/^[a-z0-9\-]+$/.test(p)) { setError('Invalid principal format'); return; }
+        if (!p || !/^[a-z0-9]{5}(?:-[a-z0-9]{1,5})+$/.test(p)) { setError('Invalid principal format'); return; }
         if (controllers.includes(p)) { setError('Already a controller'); return; }
         setError(null);
         setBusy('add');
@@ -359,14 +412,14 @@
       };
 
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-lg shadow-2xl">
             <div className="p-5 border-b border-surface-700 flex items-center justify-between">
               <div>
                 <h3 className="text-base font-semibold text-white">Controllers</h3>
                 <p className="text-xs text-gray-500 mt-0.5 font-mono">{canisterName}</p>
               </div>
-              <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
+              <button onClick={onClose} aria-label="Close" className="text-gray-500 hover:text-white transition-colors">
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
@@ -384,7 +437,7 @@
                     </div>
                     {confirmRemove === ctrl ? (
                       <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="text-[10px] text-red-400">Remove?</span>
+                        <span className="text-[10px] text-red-400">{isMe ? 'Remove yourself? You will lose control of this canister.' : 'Remove?'}</span>
                         <button onClick={() => handleRemove(ctrl)} className="text-[10px] px-2 py-1 bg-red-500 text-white rounded font-medium hover:bg-red-600">Yes</button>
                         <button onClick={() => setConfirmRemove(null)} className="text-[10px] px-2 py-1 bg-surface-700 text-gray-300 rounded font-medium hover:bg-surface-600">No</button>
                       </div>
@@ -435,15 +488,21 @@
 
     // ---- Mint Cycles Modal ----
     function MintModal({ isOpen, onClose, icpBalance, cyclesBalance, onMinted }) {
+      useEscapeToClose(isOpen, onClose);
       const [amount, setAmount] = useState('');
       const [unit, setUnit] = useState('icp'); // 'icp' or 'cycles'
       const [minting, setMinting] = useState(false);
       const [result, setResult] = useState(null);
+      // Minting burns real ICP on mainnet and can't be undone, so it takes two clicks.
+      const [confirming, setConfirming] = useState(false);
+      useEffect(() => { setConfirming(false); }, [isOpen, amount, unit]);
 
       if (!isOpen) return null;
 
       const handleMint = async () => {
         if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) return;
+        if (!confirming) { setConfirming(true); return; }
+        setConfirming(false);
         setMinting(true);
         setResult(null);
         try {
@@ -457,16 +516,16 @@
       };
 
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="p-5 border-b border-surface-700">
               <h3 className="text-base font-semibold text-white">Mint Cycles</h3>
-              <p className="text-xs text-gray-500 mt-1">Convert ICP to cycles for your identity</p>
+              <p className="text-xs text-gray-500 mt-1">Convert ICP to cycles for your identity. This happens on mainnet and spends real ICP.</p>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex gap-2 text-xs">
-                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP</span>
-                <span className="px-2 py-1 bg-surface-800 rounded text-green-400 font-mono">{cyclesBalance ? (() => { const n = Number(cyclesBalance); return n >= 1e12 ? `${(n/1e12).toFixed(2)}T` : n >= 1e9 ? `${(n/1e9).toFixed(2)}B` : n.toLocaleString(); })() : '—'} cycles</span>
+                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '-'} ICP</span>
+                <span className="px-2 py-1 bg-surface-800 rounded text-green-400 font-mono">{cyclesBalance ? (() => { const n = Number(cyclesBalance); return n >= 1e12 ? `${(n/1e12).toFixed(2)}T` : n >= 1e9 ? `${(n/1e9).toFixed(2)}B` : n.toLocaleString(); })() : '-'} cycles</span>
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1.5">Amount</label>
@@ -487,6 +546,11 @@
                   {unit === 'icp' ? `Burns ${amount || '0'} ICP to mint cycles` : `Mints ${Number(amount || 0).toLocaleString()} cycles (ICP auto-calculated)`}
                 </p>
               </div>
+              {confirming && (
+                <div className="p-3 rounded-lg text-xs bg-yellow-500/10 text-yellow-300 border border-yellow-500/20">
+                  {unit === 'icp' ? `This burns ${amount} ICP on mainnet.` : `This burns enough ICP on mainnet to mint ${Number(amount).toLocaleString()} cycles.`} It cannot be undone. Click Confirm mint to go ahead.
+                </div>
+              )}
               {result && (
                 <div className={`p-3 rounded-lg text-xs font-mono ${result.ok ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
                   {result.output}
@@ -496,7 +560,7 @@
             <div className="p-4 border-t border-surface-700 flex justify-end gap-2">
               <button onClick={() => { onClose(); setAmount(''); setResult(null); }} className="px-4 py-2 text-sm text-gray-400 hover:text-white rounded-lg hover:bg-surface-800">Close</button>
               <button onClick={handleMint} disabled={minting || !amount} className="px-4 py-2 text-sm font-medium rounded-lg bg-icp-500 hover:bg-icp-600 text-white disabled:opacity-50 disabled:cursor-not-allowed">
-                {minting ? 'Minting...' : 'Mint Cycles'}
+                {minting ? 'Minting...' : confirming ? 'Confirm mint' : 'Mint Cycles'}
               </button>
             </div>
           </div>
@@ -506,6 +570,7 @@
 
     // ---- Cycles Spending Modal ----
     function SpendingModal({ isOpen, onClose, topupHistory, network }) {
+      useEscapeToClose(isOpen, onClose);
       const [period, setPeriod] = React.useState('month');
       const [view, setView] = React.useState('all'); // 'all' or canister name
 
@@ -558,7 +623,7 @@
       const totalCycles = filtered.reduce((sum, t) => sum + BigInt(t.amount), 0n);
 
       return (
-        React.createElement('div', { className: 'fixed inset-0 bg-black/60 flex items-center justify-center z-50', onClick: onClose },
+        React.createElement('div', { role: 'dialog', 'aria-modal': 'true', className: 'fixed inset-0 bg-black/60 flex items-center justify-center z-50', onClick: onClose },
           React.createElement('div', {
             className: 'bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col',
             onClick: (e) => e.stopPropagation()
@@ -639,14 +704,19 @@
     }
 
     // ---- Top Up Modal (with source choice) ----
-    function TopUpModal({ isOpen, canisterName, onClose, icpBalance, cyclesBalance, onTopUp }) {
+    function TopUpModal({ isOpen, canisterName, network, onClose, icpBalance, cyclesBalance, onTopUp }) {
+      useEscapeToClose(isOpen, onClose);
       const [amount, setAmount] = useState('');
       const [source, setSource] = useState('cycles');
+      // Paying with ICP mints on mainnet, so it can't fund a local canister.
+      const isLocal = !network || network === 'local';
+      // Start every opening from the cycles balance rather than whatever the last canister used.
+      useEffect(() => { if (isOpen) setSource('cycles'); }, [isOpen, canisterName]);
 
       if (!isOpen) return null;
 
       const formatBal = (c) => {
-        if (!c) return '—';
+        if (!c) return '-';
         const n = Number(c);
         if (n >= 1e12) return `${(n/1e12).toFixed(2)}T`;
         if (n >= 1e9) return `${(n/1e9).toFixed(2)}B`;
@@ -657,7 +727,9 @@
       // Paying from the cycles balance can be validated client-side; the ICP
       // path can't (the ICP→cycles rate follows the live XDR rate), so for
       // that source the CLI stays the authority.
+      // The balance shown is the identity's mainnet one, so only check it off Local.
       const exceedsCycles = source === 'cycles'
+        && !isLocal
         && cyclesBalance != null
         && amount !== ''
         && !isNaN(Number(amount))
@@ -678,14 +750,14 @@
       ];
 
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="p-5 border-b border-surface-700">
               <h3 className="text-base font-semibold text-white">Top Up "{canisterName}"</h3>
             </div>
             <div className="p-5 space-y-4">
               <div className="flex gap-2 text-xs">
-                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP</span>
+                <span className="px-2 py-1 bg-surface-800 rounded text-icp-400 font-mono">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '-'} ICP</span>
                 <span className="px-2 py-1 bg-surface-800 rounded text-green-400 font-mono">{formatBal(cyclesBalance)} cycles</span>
               </div>
               <div>
@@ -710,17 +782,20 @@
                     <span className={`text-sm font-medium ${source === 'cycles' ? 'text-green-400' : 'text-gray-300'}`}>Cycles Balance</span>
                     <p className="text-[11px] text-gray-500 mt-0.5">{formatBal(cyclesBalance)} available</p>
                   </button>
-                  <button onClick={() => setSource('icp')} className={`flex-1 p-3 rounded-lg border text-left transition-colors ${source === 'icp' ? 'border-icp-500/50 bg-icp-500/10' : 'border-surface-700 bg-surface-800 hover:border-surface-600'}`}>
+                  {!isLocal && <button onClick={() => setSource('icp')} className={`flex-1 p-3 rounded-lg border text-left transition-colors ${source === 'icp' ? 'border-icp-500/50 bg-icp-500/10' : 'border-surface-700 bg-surface-800 hover:border-surface-600'}`}>
                     <span className={`text-sm font-medium ${source === 'icp' ? 'text-icp-400' : 'text-gray-300'}`}>ICP (auto-mint)</span>
-                    <p className="text-[11px] text-gray-500 mt-0.5">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '—'} ICP available</p>
-                  </button>
+                    <p className="text-[11px] text-gray-500 mt-0.5">{icpBalance ? parseFloat(icpBalance).toFixed(4) : '-'} ICP available</p>
+                  </button>}
                 </div>
+                {isLocal && (
+                  <p className="text-[11px] text-gray-500 mt-1.5">Local canisters are paid from the cycles balance. Paying with ICP mints on mainnet.</p>
+                )}
                 {source === 'icp' && (
                   <p className="text-[11px] text-yellow-400/80 mt-1.5">Will burn ICP to mint cycles, then top up the canister</p>
                 )}
                 {exceedsCycles && (
                   <p className="text-[11px] text-red-400 mt-1.5">
-                    Exceeds your cycles balance ({formatBal(cyclesBalance)} available) — lower the amount or switch to ICP (auto-mint).
+                    Exceeds your cycles balance ({formatBal(cyclesBalance)} available). Lower the amount or switch to ICP (auto-mint).
                   </p>
                 )}
               </div>
@@ -738,6 +813,7 @@
 
     // ---- Auto Top-Up Modal (per-canister automatic cycles top-up config) ----
     function AutoTopUpModal({ isOpen, canisterName, network, current, onClose, onSave }) {
+      useEscapeToClose(isOpen, onClose);
       const [enabled, setEnabled] = useState(false);
       const [threshold, setThreshold] = useState('1');
       const [target, setTarget] = useState('2');
@@ -792,7 +868,7 @@
       };
 
       return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border border-surface-700 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="p-5 border-b border-surface-700">
               <h3 className="text-base font-semibold text-white">Auto Top-Up "{canisterName}"</h3>
@@ -802,6 +878,7 @@
               <div className="flex items-center justify-between p-2.5 bg-surface-800 rounded-xl">
                 <span className="text-xs text-gray-400">Enabled</span>
                 <button
+                  role="switch" aria-checked={enabled} aria-label="Auto top-up enabled"
                   onClick={() => setEnabled((v) => !v)}
                   className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-green-500' : 'bg-surface-700'}`}
                 >
@@ -833,7 +910,7 @@
                 </div>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1.5">Daily cap (T) <span className="text-gray-600">— optional</span></label>
+                <label className="block text-sm text-gray-400 mb-1.5">Daily cap (T) <span className="text-gray-600">(optional)</span></label>
                 <input
                   type="text"
                   value={dailyCap}
@@ -860,6 +937,7 @@
 
     // ---- Reinstall Confirm Modal (quadruple confirmation) ----
     function ReinstallConfirmModal({ isOpen, canisterCount, network, onConfirm, onCancel }) {
+      useEscapeToClose(isOpen, onCancel);
       const [step, setStep] = useState(1);
       const [typed, setTyped] = useState('');
       const REQUIRED_PHRASE = 'i will wipe all my app data';
@@ -944,7 +1022,7 @@
           disabled: typed.toLowerCase() !== REQUIRED_PHRASE,
         },
         4: {
-          title: 'LAST CHANCE — Point of no return',
+          title: 'LAST CHANCE: point of no return',
           body: (
             <div className="space-y-3">
               <div className="p-4 bg-red-500/15 border-2 border-red-500/40 rounded-lg text-center">
@@ -961,7 +1039,7 @@
       const current = stepContent[step];
 
       return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div role="dialog" aria-modal="true" className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-surface-900 border-2 border-red-500/40 rounded-2xl w-full max-w-lg shadow-2xl">
             {/* Step indicator */}
             <div className="px-5 pt-4 flex items-center gap-1.5">
@@ -1050,7 +1128,7 @@
           if (seq !== fetchSeq.current) return;
           if (snapData.error) {
             const notDeployed = snapData.error.includes('Cannot find canister id');
-            setMessage({ type: notDeployed ? 'warn' : 'error', text: notDeployed ? `Not deployed on ${network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network} — deploy first to use snapshots.` : snapData.error });
+            setMessage({ type: notDeployed ? 'warn' : 'error', text: notDeployed ? `Not deployed on ${network === 'ic' ? 'production' : network === 'local' ? 'local replica' : network}. Deploy first to use snapshots.` : snapData.error });
             setSnapshots([]);
           } else {
             setSnapshots(snapData.snapshots || []);
@@ -1058,7 +1136,13 @@
           setCanisterStatus(statusData.runningStatus || null);
         } catch (e) {
           if (seq !== fetchSeq.current) return;
-          setMessage({ type: 'error', text: e.message });
+          // The list route answers 500 for a canister with no ID here, so the
+          // friendly "not deployed" case arrives as a thrown error.
+          const notDeployed = /Cannot find canister id|not found in environment|could not find .*canister id/i.test(e.message);
+          setMessage(notDeployed
+            ? { type: 'warn', text: `Not deployed on ${network === 'ic' ? 'production' : network === 'local' ? 'the local replica' : network}. Deploy first to use snapshots.` }
+            : { type: 'error', text: e.message });
+          setSnapshots([]);
         }
         setLoading(false);
       }, [selectedCanister, projectPath, network]);
@@ -1088,7 +1172,7 @@
           } else {
             let errText = data.error || 'Failed to create snapshot';
             if (data.steps?.stopped && !data.steps?.restarted) {
-              errText += ' — WARNING: canister may still be stopped, check Canisters tab';
+              errText += '. WARNING: the canister may still be stopped; check the Canisters tab.';
             }
             setMessage({ type: 'error', text: errText });
           }
@@ -1213,7 +1297,7 @@
             <div>
               <h2 className="text-base font-semibold text-white">Snapshots & Data</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Backup, restore, and extract canister data — {networkLabel}
+                Backup, restore, and extract canister data: {networkLabel}
               </p>
             </div>
           </div>
@@ -1256,7 +1340,7 @@
                 <path strokeLinecap="round" strokeLinejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
               </svg>
               <div>
-                <p className="text-xs text-icp-300 font-medium">Canister is running — snapshots will auto-stop and restart it</p>
+                <p className="text-xs text-icp-300 font-medium">Canister is running. Creating a snapshot stops and restarts it for you.</p>
                 <p className="text-[11px] text-icp-400/70 mt-0.5">Creating a snapshot will briefly stop the canister, take the snapshot, then restart it automatically.</p>
               </div>
             </div>
@@ -1272,7 +1356,7 @@
             }`}>
               {message.type === 'info' && <SpinnerIcon className="w-3.5 h-3.5 shrink-0 mt-0.5" />}
               <p className="break-all">{message.text}</p>
-              <button onClick={() => setMessage(null)} className="ml-auto text-gray-500 hover:text-white shrink-0">&times;</button>
+              <button onClick={() => setMessage(null)} aria-label="Dismiss message" className="ml-auto text-gray-500 hover:text-white shrink-0">&times;</button>
             </div>
           )}
 
@@ -1350,7 +1434,7 @@
                   <div className="mt-3">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-[11px] text-gray-500 font-mono">{metadata.name}</span>
-                      <button onClick={() => setMetadata(null)} className="text-[11px] text-gray-600 hover:text-white">&times;</button>
+                      <button onClick={() => setMetadata(null)} aria-label="Close metadata" className="text-[11px] text-gray-600 hover:text-white">&times;</button>
                     </div>
                     {metadata.error ? (
                       <p className="text-xs text-red-400">{metadata.error}</p>
@@ -1458,6 +1542,7 @@
                             </button>
                             <button
                               onClick={() => setShowDownloadInput(null)}
+                              aria-label="Cancel download"
                               className="px-2 py-2 text-xs text-gray-500 hover:text-white"
                             >
                               &times;
@@ -1482,7 +1567,8 @@
               message={confirmAction.type === 'load'
                 ? `This will replace the canister's current code and data with the snapshot. Any data added after the snapshot was taken will be lost. The canister must be stopped.`
                 : `This will permanently delete snapshot ${confirmAction.id.slice(0, 16)}... This cannot be undone.`}
-              danger={confirmAction.type === 'delete'}
+              danger={confirmAction.type === 'delete' || network !== 'local'}
+              confirmPhrase={confirmAction.type === 'load' && network !== 'local' ? 'restore this snapshot' : undefined}
               onConfirm={() => {
                 const action = confirmAction;
                 setConfirmAction(null);
@@ -1530,10 +1616,10 @@
       const notDeployed = canisterNames.filter(n => !canisters[n].canisterId);
 
       return (
-        <div className="space-y-4 text-sm">
+        <div className="space-y-4 text-sm font-sans">
           {/* Deployment Status — local build vs on-chain */}
           <div>
-            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Deployment Status — {summaryNetLabel}</h4>
+            <h4 className="text-[11px] font-medium text-gray-500 uppercase tracking-[0.08em] mb-2 font-sans">Deployment status · {summaryNetLabel}</h4>
             {needsRedeploy.length > 0 && (
               <div className="mb-2 flex items-center gap-2 p-2 bg-orange-500/10 border border-orange-500/20 rounded-lg">
                 <svg className="w-3.5 h-3.5 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
@@ -1573,7 +1659,7 @@
                       <span className={`text-[11px] px-2 py-0.5 rounded-full ${badgeClass} ${isAssetCanister && isDeployed ? 'relative group' : ''}`}>
                         {badge}
                         {isAssetCanister && isDeployed && (
-                          <span className="absolute bottom-full right-0 mb-1.5 hidden group-hover:block text-[10px] text-gray-300 bg-surface-800 border border-surface-600 rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">Not built locally — no hash comparison</span>
+                          <span className="absolute bottom-full right-0 mb-1.5 hidden group-hover:block text-[10px] text-gray-300 bg-surface-800 border border-surface-600 rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">Not built locally, so no hash comparison</span>
                         )}
                       </span>
                     </div>
@@ -1598,20 +1684,20 @@
                             <span className="text-icp-400 font-mono">{c.version.gitCommit}</span>
                             {c.version.gitBranch && <span className="text-gray-600">({c.version.gitBranch})</span>}
                             {c.version.timestamp && (
-                              <span className="text-gray-600">— {new Date(c.version.timestamp).toLocaleDateString()}</span>
+                              <span className="text-gray-600">, {new Date(c.version.timestamp).toLocaleDateString()}</span>
                             )}
                           </div>
                         )}
                         {c.hashMatch === null && c.moduleHash && c.moduleHash !== 'None' && !c.localWasmHash && !isRemote && (
-                          <div className="text-gray-600 text-[11px]">No local build found — run a build to compare</div>
+                          <div className="text-gray-600 text-[11px]">No local build found. Run a build to compare.</div>
                         )}
                       </div>
                     )}
                     {!isDeployed && hasLocalWasm && (
-                      <div className="text-xs text-gray-500">Local WASM ready — will be a fresh install</div>
+                      <div className="text-xs text-gray-500">Local WASM ready: this will be a fresh install</div>
                     )}
                     {!isDeployed && !hasLocalWasm && (
-                      <div className="text-xs text-gray-500">No local WASM — build required before deploy</div>
+                      <div className="text-xs text-gray-500">No local WASM: build before deploying</div>
                     )}
                   </div>
                 );
@@ -1642,10 +1728,10 @@
       const otherTier = tier === 'production' ? 'staging' : 'production';
 
       const formatCycles = (c) => {
-        if (!c) return '—';
+        if (!c) return '-';
         let big = null;
         try { big = BigInt(String(c).replace(/[^0-9]/g, '')); } catch {}
-        if (big === null) return '—';
+        if (big === null) return '-';
         const n = Number(big);
         if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
         if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
@@ -1814,7 +1900,7 @@
               <h2 className="text-base font-semibold text-white">Fleet Canisters</h2>
               <p className="text-sm text-gray-500 mt-0.5">
                 Every canister across your {fleet?.projectsScanned ?? 0} recent projects, split into production and staging
-                {fleet?.identity ? <span> — identity <span className="text-gray-400 font-mono">{fleet.identity}</span></span> : null}
+                {fleet?.identity ? <span>, identity <span className="text-gray-400 font-mono">{fleet.identity}</span></span> : null}
               </p>
             </div>
             <button
@@ -1834,8 +1920,8 @@
           <div className="flex gap-1 bg-surface-900 rounded-xl p-1 border border-surface-700 w-fit">
             {['production', 'staging'].map((t) => {
               const activeStyle = t === 'production'
-                ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/20'
-                : 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white shadow-lg shadow-yellow-500/20';
+                ? 'bg-orange-500/15 text-orange-200 ring-1 ring-inset ring-orange-400/40'
+                : 'bg-amber-500/15 text-amber-200 ring-1 ring-inset ring-amber-400/35';
               return (
                 <button
                   key={t}
@@ -1980,7 +2066,7 @@
 
           {loading && entries.length === 0 ? (
             <div className="flex items-center justify-center py-16 text-gray-500 gap-3">
-              <SpinnerIcon className="w-5 h-5" /> Checking canister status across projects — this can take a moment...
+              <SpinnerIcon className="w-5 h-5" /> Checking canister status across projects. This can take a moment...
             </div>
           ) : !error && entries.length === 0 && fleet ? (
             <div className="px-5 py-10 text-center bg-surface-900 border border-surface-700 rounded-2xl">
@@ -2046,7 +2132,7 @@
                                   <span
                                     key={`${e.canisterId}-${f.key}`}
                                     className="text-[10px] px-1.5 py-0.5 rounded bg-surface-800 text-gray-400 border border-surface-700 font-mono"
-                                    title={`${e.project}${f.key === 'low-freeze' ? ` — freezing threshold ${freezeDays(e.freezingThreshold)} days` : ''}`}
+                                    title={`${e.project}${f.key === 'low-freeze' ? `: freezing threshold ${freezeDays(e.freezingThreshold)} days` : ''}`}
                                   >
                                     {e.projectName}/{e.name}
                                     <span className="text-gray-600"> {e.network}</span>
@@ -2112,10 +2198,10 @@
                             <div className="flex items-center gap-2">
                               <span className="text-sm font-semibold text-white">{e.name}</span>
                               <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                                e.type === 'motoko' ? 'bg-purple-500/20 text-purple-300' :
-                                e.type === 'rust' ? 'bg-orange-500/20 text-orange-300' :
-                                e.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
-                                'bg-gray-500/20 text-gray-300'
+                                e.type === 'motoko' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                e.type === 'rust' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                e.type === 'assets' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10'
                               }`}>{e.type}</span>
                               {/* The chip shows the network the environment
                                   RESOLVES to, not its name: a "staging"
@@ -2125,9 +2211,9 @@
                                   The environment name lives in the tooltip. */}
                               <span
                                 className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${
-                                  e.networkResolved === 'ic' ? 'bg-orange-500/20 text-orange-300' :
-                                  e.networkResolved ? 'bg-yellow-500/20 text-yellow-300' :
-                                  'bg-gray-500/20 text-gray-400'
+                                  e.networkResolved === 'ic' ? 'bg-orange-500/10 text-orange-300 ring-1 ring-inset ring-orange-400/30' :
+                                  e.networkResolved ? 'bg-yellow-500/10 text-yellow-300 ring-1 ring-inset ring-yellow-400/30' :
+                                  'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10'
                                 }`}
                                 title={e.networkResolved
                                   ? (e.networkResolved === e.network
@@ -2206,7 +2292,7 @@
                           <div className="flex items-center gap-2 shrink-0">
                             <button
                               onClick={() => onTopUp(e)}
-                              className="px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors"
+                              className="px-3 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-200 border border-icp-400/25 rounded-lg hover:bg-icp-500/20 hover:text-white transition-colors"
                             >Top Up</button>
                             <button
                               onClick={() => onAutoTopUp(e)}
@@ -2444,7 +2530,10 @@
           const data = await api.post('/api/autotopup/status', { path: projectPath });
           setAutoTopUpConfig(data.config || {});
           setAutoTopUpGlobal(data.global || {});
-        } catch { /* leave existing config in place on failure */ }
+        } catch {
+          // Never keep showing another project's settings under this one.
+          setAutoTopUpConfig({});
+        }
       }, [projectPath]);
 
       // Scan every recent project across every non-local network in one pass.
@@ -2575,6 +2664,7 @@
       // network — a staging canister on a testnet has different balances.
       const openFleetTopUp = useCallback((entry) => {
         setTopUpModal({ canisterName: entry.name, path: entry.project, network: entry.network, fleet: true });
+        setFleetBalances({ icp: null, cycles: null }); // never show the previous canister's figures
         // `path` lets the server resolve a custom environment name (e.g.
         // 'staging') against that project's icp.yaml — without it the CLI
         // rejects the environment as an unknown network.
@@ -2615,6 +2705,13 @@
         } catch { setIcpBalance(null); }
       }, [network, projectPath]);
 
+      // Header balances depend on the network (and, for a named environment,
+      // the project), so re-read them whenever either changes, not only on mount.
+      useEffect(() => {
+        fetchIcpBalance();
+        fetchCyclesBalance();
+      }, [network, projectLoadCount]); // not projectPath: that changes on every keystroke in the path box
+
       // Load identities + CLI info + settings on mount
       useEffect(() => {
         api.get('/api/cli').then(setCliInfo).catch(() => {});
@@ -2628,8 +2725,6 @@
         }).catch(() => {});
 
         fetchPrincipal();
-        fetchIcpBalance();
-        fetchCyclesBalance();
 
         refreshReplicaStatus();
 
@@ -2639,7 +2734,8 @@
           if (settings.buildBeforeDeploy !== undefined) setBuildBeforeDeploy(settings.buildBeforeDeploy);
           setAutoTopUpGlobal((prev) => ({
             ...prev,
-            autoTopupEnabled: settings.autoTopupEnabled !== undefined ? settings.autoTopupEnabled : prev.autoTopupEnabled,
+            // Unset means on, exactly as the server's monitor reads it.
+            autoTopupEnabled: settings.autoTopupEnabled !== false,
             reserveCycles: settings.autoTopupReserveCycles !== undefined ? settings.autoTopupReserveCycles : prev.reserveCycles,
             reserveIcp: settings.autoTopupReserveIcp !== undefined ? settings.autoTopupReserveIcp : prev.reserveIcp,
           }));
@@ -2727,14 +2823,24 @@
             setProjectLoadCount((c) => c + 1);
           }
         } catch (e) {
+          // Don't leave the previous project's canisters on screen under the new path.
+          setCanisters([]);
+          setCanisterStatuses({});
+          setDeploySummary(null);
+          setProjectLoaded(false);
           setLogs((prev) => [...prev, { type: 'error', text: e.message }]);
+          addToast(`Could not load project: ${e.message}`, 'error');
         }
         setLoadingProject(false);
       }, []);
 
       // Fetch deploy summary
+      // Only the newest request may write the summary: an older one finishing
+      // later (network or project switched meanwhile) is for something else.
+      const summarySeq = useRef(0);
       const fetchDeploySummary = useCallback(async () => {
         if (!projectPath || !projectLoaded) return;
+        const seq = ++summarySeq.current;
         setSummaryLoading(true);
         try {
           const data = await api.post('/api/deploy/summary', {
@@ -2742,14 +2848,11 @@
             network,
             canisterNames: ownedCanisters.map((c) => c.name),
           });
-          // The network switched while this was in flight: its answer is for the old one.
-          if (networkRef.current !== network) return;
-          setDeploySummary(data);
+          if (seq === summarySeq.current) setDeploySummary(data);
         } catch (e) {
-          if (networkRef.current !== network) return;
-          setDeploySummary({ error: e.message });
+          if (seq === summarySeq.current) setDeploySummary({ error: e.message });
         }
-        setSummaryLoading(false);
+        if (seq === summarySeq.current) setSummaryLoading(false);
       }, [projectPath, projectLoaded, network, canisters]);
 
       useEffect(() => {
@@ -2805,7 +2908,7 @@
               ws.close();
               fetchDeploySummary();
               if (msg.data === 'success') addToast('Deploy completed successfully', 'success');
-              else if (msg.data === 'error') addToast('Deploy failed — check logs', 'error');
+              else if (msg.data === 'error') addToast('Deploy failed, check logs', 'error');
               else if (msg.data === 'cancelled') addToast('Deploy cancelled', 'info');
             }
           } else if (msg.type === 'error') {
@@ -2926,8 +3029,8 @@
               });
             } else if (msg.data === 'replica-error') {
               settle(() => {
-                setLogs((prev) => [...prev, { type: 'error', text: 'The replica failed to start — see the output above for the reason.' }]);
-                addToast('Replica failed to start — check logs', 'error');
+                setLogs((prev) => [...prev, { type: 'error', text: 'The replica failed to start. See the output above for the reason.' }]);
+                addToast('Replica failed to start, check logs', 'error');
               });
             }
           } else if (msg.type === 'error') {
@@ -2950,8 +3053,8 @@
         ws.onclose = (event) => {
           settle(() => {
             const why = event.reason || `connection closed (code ${event.code})`;
-            setLogs((prev) => [...prev, { type: 'error', text: `Replica start aborted — ${why}` }]);
-            addToast(`Replica start aborted — ${why}`, 'error');
+            setLogs((prev) => [...prev, { type: 'error', text: `Replica start aborted: ${why}` }]);
+            addToast(`Replica start aborted: ${why}`, 'error');
           });
         };
       }, [projectPath, refreshReplicaStatus]);
@@ -3086,11 +3189,11 @@
             fetchIcpBalance();
           }
         } catch (e) {
-          if (ctx.fleet) {
-            addToast(`Top-up failed for ${name}: ${e.message}`, 'error');
-          } else {
-            setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
-          }
+          // A toast, not an error written into the card: that hid the card's
+          // cycles, buttons and Refresh until the page was reloaded.
+          addToast(`Top-up failed for ${name}: ${e.message}`, 'error');
+          setLogs((prev) => [...prev, { type: 'error', text: `Top-up failed for ${name}: ${e.message}` }]);
+          if (!ctx.fleet) setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: false } }));
         }
       }, [topUpModal, projectPath, network, fetchCanisterStatus, fetchTopupHistory, fetchCyclesBalance, fetchIcpBalance, fetchFleet, addToast]);
 
@@ -3143,15 +3246,23 @@
         try {
           const data = await api.post('/api/autotopup/run-now', {});
           const actions = Array.isArray(data.actions) ? data.actions : [];
+          // An action without a canister is about the whole run (switched
+          // off, or another dashboard is already running one).
+          const whole = actions.find((a) => !a.canister);
+          if (whole) {
+            setLogs((prev) => [...prev, { type: 'info', text: `Auto top-up did not run: ${whole.reason}.` }]);
+            addToast(`Auto top-up did not run: ${whole.reason}`, 'info');
+            return;
+          }
           if (actions.length === 0) {
-            setLogs((prev) => [...prev, { type: 'info', text: 'Auto top-up run: no canisters needed topping up.' }]);
+            setLogs((prev) => [...prev, { type: 'info', text: 'Auto top-up run: no canisters have auto top-up turned on.' }]);
           } else {
             setLogs((prev) => [
               ...prev,
               { type: 'info', text: `Auto top-up run: ${actions.length} canister(s) checked` },
               ...actions.map((a) => ({
                 type: a.action === 'topped-up' ? 'info' : 'log',
-                text: `  ${a.network}/${a.canister}: ${a.action}${a.amount ? ` (${a.amount})` : ''}${a.reason ? ` — ${a.reason}` : ''}`,
+                text: `  ${a.network}/${a.canister}: ${a.action}${a.amount ? ` (${a.amount})` : ''}${a.reason ? `: ${a.reason}` : ''}`,
               })),
             ]);
           }
@@ -3162,31 +3273,6 @@
           addToast('Auto top-up run failed', 'error');
         }
       }, [addToast, fetchAutoTopUpConfig]);
-
-      // Add controller to canister
-      const addController = useCallback((name) => {
-        const principal = prompt('Enter principal ID to add as controller:');
-        if (!principal || !/^[a-z0-9-]+$/.test(principal)) {
-          if (principal) alert('Invalid principal ID format');
-          return;
-        }
-        setConfirmModal({
-          title: `Add controller to "${name}"`,
-          message: `Add ${principal.slice(0, 10)}...${principal.slice(-5)} as a controller of "${name}" on ${networkLabel}?`,
-          danger: false,
-          onConfirm: async () => {
-            setConfirmModal(null);
-            setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], loading: true } }));
-            try {
-              await api.post('/api/canister/update-settings', { path: projectPath, canister: name, network, addController: principal });
-              setLogs((prev) => [...prev, { type: 'info', text: `Added controller to ${name}: ${principal}` }]);
-              await fetchCanisterStatus(name);
-            } catch (e) {
-              setCanisterStatuses((prev) => ({ ...prev, [name]: { ...prev[name], error: e.message, loading: false } }));
-            }
-          },
-        });
-      }, [projectPath, network, networkLabel, fetchCanisterStatus]);
 
       const toggleCanister = (name) => {
         setSelectedCanisters((prev) =>
@@ -3231,7 +3317,7 @@
                     </span>
                   </div>
                 )}
-                <span className="text-[11px] text-gray-600 font-mono">{cliInfo.version?.split('\n')[0] || cliInfo.cli}</span>
+                <span className="text-[11px] text-gray-600 font-mono">{cliInfo.cli === null ? 'icp CLI not found' : (cliInfo.version?.split('\n')[0] || cliInfo.cli)}</span>
                 {(icpBalance !== null || cyclesBalance !== null) && (
                   <div className="flex items-center gap-2 px-2.5 py-1 bg-surface-800 border border-surface-700 rounded-lg">
                     {icpBalance !== null && (
@@ -3312,6 +3398,12 @@
           </header>
 
           <main className="max-w-6xl mx-auto px-6 py-6">
+            {cliInfo.cli === null && (
+              <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-sm text-red-300">
+                <p className="font-semibold">The icp CLI was not found.</p>
+                <p className="mt-1 text-red-300/80">This dashboard runs the <span className="font-mono">icp</span> command for you, so nothing will work until it is installed. Follow the <a href="https://github.com/dfinity/icp-cli" target="_blank" rel="noopener noreferrer" className="underline">icp-cli install instructions</a>, then restart the dashboard.</p>
+              </div>
+            )}
             {/* Project Selector */}
             <div className="mb-6">
               <label className="block text-sm font-medium text-gray-300 mb-2">Project Folder</label>
@@ -3385,7 +3477,7 @@
                     onClick={() => setTab(t)}
                     className={`relative px-5 py-2 rounded-lg text-sm font-medium transition-all ${
                       tab === t
-                        ? 'bg-icp-500 text-white shadow-lg shadow-icp-500/20'
+                        ? 'bg-surface-700 text-white shadow-sm ring-1 ring-inset ring-white/10'
                         : 'text-gray-400 hover:text-white hover:bg-surface-800'
                     }`}
                   >
@@ -3449,11 +3541,13 @@
                   {availableNetworks.map((n) => {
                     const label = n === 'local' ? 'Local' : n === 'ic' ? 'Production' : n.charAt(0).toUpperCase() + n.slice(1);
                     const isCustom = n !== 'local' && n !== 'ic';
+                    // Production stays warm on purpose: it is the one you must not
+                    // land on by accident. Tinted, not a loud gradient.
                     const activeStyle = n === 'ic'
-                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/20'
+                      ? 'bg-orange-500/15 text-orange-200 ring-1 ring-inset ring-orange-400/40'
                       : n === 'local'
-                      ? 'bg-gradient-to-r from-icp-500 to-icp-600 text-white shadow-lg shadow-icp-500/20'
-                      : 'bg-gradient-to-r from-yellow-500 to-amber-500 text-white shadow-lg shadow-yellow-500/20';
+                      ? 'bg-surface-700 text-white ring-1 ring-inset ring-white/10'
+                      : 'bg-amber-500/15 text-amber-200 ring-1 ring-inset ring-amber-400/35';
                     return (
                       <div key={n} className="relative group">
                         <button
@@ -3486,8 +3580,9 @@
                                 },
                               });
                             }}
-                            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/80 text-white text-[9px] font-bold items-center justify-center hidden group-hover:flex hover:bg-red-500 transition-colors"
+                            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500/80 text-white text-[9px] font-bold items-center justify-center hidden group-hover:flex focus:flex hover:bg-red-500 transition-colors"
                             title={`Remove "${label}" network`}
+                            aria-label={`Remove "${label}" network`}
                           >
                             &times;
                           </button>
@@ -3502,7 +3597,7 @@
                       const name = prompt('Enter network name (e.g. "staging"):');
                       if (!name || !name.trim()) return;
                       const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-                      if (!cleanName) { alert('Invalid name — use letters, numbers, hyphens, underscores'); return; }
+                      if (!cleanName) { alert('Invalid name: use letters, numbers, hyphens, underscores'); return; }
                       if (availableNetworks.includes(cleanName)) { alert(`Network "${cleanName}" already exists`); return; }
                       api.post('/api/project/network', { path: projectPath, action: 'add', name: cleanName }).then((data) => {
                         if (data.ok) {
@@ -3538,7 +3633,7 @@
                       onClick={() => setIdentityExpanded((v) => !v)}
                       className="flex items-center justify-between w-full text-sm font-medium text-gray-300 mb-1 hover:text-white transition-colors"
                     >
-                      <span>Identity {selectedIdentity ? `— ${selectedIdentity}` : ''}</span>
+                      <span>Identity{selectedIdentity ? `: ${selectedIdentity}` : ''}</span>
                       <svg className={`w-4 h-4 text-gray-500 transition-transform ${identityExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
                       </svg>
@@ -3549,6 +3644,7 @@
                         value={selectedIdentity}
                         onChange={async (e) => {
                           const name = e.target.value;
+                          const previous = selectedIdentity;
                           setSelectedIdentity(name);
                           try {
                             await api.post('/api/identity/use', { name });
@@ -3556,7 +3652,10 @@
                             fetchIcpBalance();
                             fetchCyclesBalance();
                           } catch (err) {
-                            console.error('Failed to switch identity:', err);
+                            // Put the dropdown back: showing the new name while the
+                            // CLI stayed on the old one sent the wrong identity to the next deploy.
+                            setSelectedIdentity(previous);
+                            addToast(`Could not switch identity: ${err.message}`, 'error');
                           }
                         }}
                         className="flex-1 bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-icp-500 text-sm appearance-none cursor-pointer"
@@ -3617,7 +3716,7 @@
                       onClick={() => setDeployModeExpanded((v) => !v)}
                       className="flex items-center justify-between w-full text-sm font-medium text-gray-300 mb-1 hover:text-white transition-colors"
                     >
-                      <span>Deploy Mode {deployMode ? `— ${deployMode.charAt(0).toUpperCase() + deployMode.slice(1)}` : '— Auto'}</span>
+                      <span>Deploy Mode{deployMode ? `: ${deployMode.charAt(0).toUpperCase() + deployMode.slice(1)}` : ': Auto'}</span>
                       <svg className={`w-4 h-4 text-gray-500 transition-transform ${deployModeExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
                       </svg>
@@ -3658,6 +3757,7 @@
                     <div className="mt-3 flex items-center justify-between p-2.5 bg-surface-800 rounded-xl">
                       <span className="text-xs text-gray-400">Build before deploy</span>
                       <button
+                        role="switch" aria-checked={!!buildBeforeDeploy} aria-label="Build before deploy"
                         onClick={() => {
                           const next = !buildBeforeDeploy;
                           setBuildBeforeDeploy(next);
@@ -3673,6 +3773,7 @@
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-gray-400">Auto top-up (master switch)</span>
                         <button
+                          role="switch" aria-checked={!!autoTopUpGlobal.autoTopupEnabled} aria-label="Auto top-up master switch"
                           onClick={() => {
                             const next = !autoTopUpGlobal.autoTopupEnabled;
                             saveAutoTopUpGlobal({ autoTopupEnabled: next }, { autoTopupEnabled: next });
@@ -3706,7 +3807,7 @@
                       </div>
                       <button
                         onClick={runAutoTopUpNow}
-                        className="w-full px-3 py-1.5 text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg hover:bg-green-500/20 transition-colors"
+                        className="w-full px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:bg-surface-700 hover:text-white transition-colors"
                       >Run now</button>
                     </div>
                     </React.Fragment>}
@@ -3787,13 +3888,13 @@
                   <div className="sticky bottom-6 z-10">
                   <button
                     onClick={deployStatus === 'deploying' ? cancelDeploy : deploy}
-                    disabled={!projectLoaded || selectedCanisters.length === 0}
-                    className={`w-full py-4 rounded-2xl text-white font-bold text-base transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                    disabled={deployStatus !== 'deploying' && (!projectLoaded || selectedCanisters.length === 0)}
+                    className={`w-full py-3.5 rounded-xl text-white font-semibold text-[15px] tracking-tight transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-black/40 ${
                       deployStatus === 'deploying'
-                        ? 'bg-red-500 hover:bg-red-600 deploying'
+                        ? 'bg-red-600 hover:bg-red-500 deploying'
                         : network === 'ic'
-                        ? 'bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 shadow-lg shadow-orange-500/20'
-                        : 'bg-gradient-to-r from-icp-500 to-icp-600 hover:from-icp-600 hover:to-icp-700 shadow-lg shadow-icp-500/20'
+                        ? 'bg-orange-600 hover:bg-orange-500'
+                        : 'bg-icp-500 hover:bg-icp-400'
                     }`}
                   >
                     {deployStatus === 'deploying' ? (
@@ -3851,7 +3952,7 @@
                         <div className={className} title={title}>
                           {icon}
                           {label}
-                          <span className="text-[11px] text-gray-600 ml-1">— start replica</span>
+                          <span className="text-[11px] text-gray-600 ml-1">(start the replica)</span>
                         </div>
                       );
                     }
@@ -3920,7 +4021,7 @@
                     <h2 className="text-base font-semibold text-white">Canister Status</h2>
                     <p className="text-sm text-gray-500 mt-0.5">
                       {projectLoaded
-                        ? `${ownedCanisters.length} canister(s) — ${networkLabel}`
+                        ? `${ownedCanisters.length} canister(s), ${networkLabel}`
                         : 'Load a project to view canisters'}
                     </p>
                   </div>
@@ -3940,10 +4041,10 @@
                 </div>
 
                 {/* Network indicator */}
-                <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm ${
+                <div className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-[13px] ${
                   network === 'ic'
-                    ? 'bg-orange-500/10 border border-orange-500/20 text-orange-300'
-                    : 'bg-icp-500/10 border border-icp-500/20 text-icp-300'
+                    ? 'bg-orange-500/[0.06] border border-orange-500/15 text-orange-200/90'
+                    : 'bg-icp-500/[0.06] border border-icp-500/15 text-icp-200/90'
                 }`}>
                   <div className={`w-2 h-2 rounded-full ${network === 'ic' ? 'bg-orange-400' : 'bg-icp-400'}`} />
                   Showing {networkLabel.toLowerCase()} canister status
@@ -3985,7 +4086,7 @@
                               {extHasStatus && es.moduleHash && es.moduleHash !== 'None' && (
                                 <p className="text-[11px] text-gray-600 mt-1.5 font-mono">Module: {es.moduleHash.slice(0, 18)}...</p>
                               )}
-                              <p className="text-xs text-gray-600 mt-2">Externally owned canister — not controlled by your identity.</p>
+                              <p className="text-xs text-gray-600 mt-2">Externally owned canister: not controlled by your identity.</p>
                             </div>
                           </div>
                         );
@@ -4001,10 +4102,10 @@
                       }
 
                       const formatCycles = (c) => {
-                        if (!c) return '—';
+                        if (!c) return '-';
                         let big = null;
                         try { big = BigInt(String(c).replace(/[^0-9]/g, '')); } catch {}
-                        if (big === null || big === 0n) return '—';
+                        if (big === null) return '-'; // 0 is a real (critical) balance, not missing
                         const n = Number(big);
                         if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
                         if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
@@ -4048,11 +4149,11 @@
                                   <span className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-gray-500/20 text-gray-400 border border-gray-500/20">Not your controller</span>
                                 )}
                                 <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                                  c.type === 'motoko' ? 'bg-purple-500/20 text-purple-300' :
-                                  c.type === 'rust' ? 'bg-orange-500/20 text-orange-300' :
-                                  c.type === 'assets' ? 'bg-blue-500/20 text-blue-300' :
-                                  c.type === 'custom' ? 'bg-amber-500/20 text-amber-300' :
-                                  'bg-gray-500/20 text-gray-300'
+                                  c.type === 'motoko' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                  c.type === 'rust' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                  c.type === 'assets' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                  c.type === 'custom' ? 'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10' :
+                                  'bg-surface-800 text-gray-400 ring-1 ring-inset ring-white/10'
                                 }`}>{c.type}</span>
                                 {autoTopUpConfig[network]?.[c.name]?.enabled && (
                                   <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-green-500/20 text-green-300">Auto</span>
@@ -4113,7 +4214,7 @@
                                 </div>
                                 <div className="flex items-center justify-between mt-1.5">
                                   <span className={`text-[11px] ${healthColors[health]}`}>
-                                    {health === 'great' ? 'Healthy' : health === 'good' ? 'Good' : health === 'low' ? 'Running low — top up soon' : 'Critical — canister may freeze!'}
+                                    {health === 'great' ? 'Healthy' : health === 'good' ? 'Good' : health === 'low' ? 'Running low, top up soon' : 'Critical: canister may freeze!'}
                                   </span>
                                   <span className="text-[11px] text-gray-600">{Number(cycles).toLocaleString()} cycles</span>
                                 </div>
@@ -4136,7 +4237,7 @@
                                     <p className="text-xs text-red-300 break-words whitespace-pre-wrap">{s.error}</p>
                                   </div>
                                   {(s.error.includes('IC0207') || s.error.includes('out of cycles') || s.error.includes('is frozen')) && (
-                                    <button onClick={() => setTopUpModal({ canisterName: c.name })} className="mt-3 px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors">Top Up</button>
+                                    <button onClick={() => setTopUpModal({ canisterName: c.name })} className="mt-3 px-3 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-200 border border-icp-400/25 rounded-lg hover:bg-icp-500/20 hover:text-white transition-colors">Top Up</button>
                                   )}
                                 </div>
                               )
@@ -4200,15 +4301,15 @@
                                 </div>
                               )}
                               {singleController && isMyCanister && network === 'ic' && (
-                                <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                                <div className="flex items-center gap-2 px-2.5 py-1.5 bg-yellow-500/[0.06] border border-yellow-500/15 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
-                                  <span className="text-[11px] text-yellow-300">Single controller — add a backup to prevent lockout</span>
+                                  <span className="text-[11px] text-yellow-300">Single controller: add a backup to prevent lockout</span>
                                 </div>
                               )}
                               {freezeWarning && isMyCanister && network === 'ic' && (
-                                <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+                                <div className="flex items-center gap-2 px-2.5 py-1.5 bg-yellow-500/[0.06] border border-yellow-500/15 rounded-lg">
                                   <svg className="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
-                                  <span className="text-[11px] text-yellow-300">Freezing threshold is {freezeDays} days — recommended 90+ for production</span>
+                                  <span className="text-[11px] text-yellow-300">Freezing threshold is {freezeDays} days. 90+ is recommended for production.</span>
                                 </div>
                               )}
                             </div>
@@ -4228,7 +4329,7 @@
                                 {s.version ? (
                                   <span className="text-[11px] text-icp-400 font-mono" title={s.moduleHash}>
                                     {s.version.gitCommit}{s.version.gitBranch ? ` (${s.version.gitBranch})` : ''}{s.version.gitDirty ? ' *dirty*' : ''}
-                                    {s.version.timestamp ? ` — ${new Date(s.version.timestamp).toLocaleDateString()}` : ''}
+                                    {s.version.timestamp ? `, ${new Date(s.version.timestamp).toLocaleDateString()}` : ''}
                                   </span>
                                 ) : s.moduleHash && s.moduleHash !== 'None' ? (
                                   <span className="text-[11px] text-gray-500 font-mono truncate" title={s.moduleHash}>Module: {s.moduleHash.slice(0, 14)}...</span>
@@ -4252,18 +4353,18 @@
                               {/* Lifecycle actions */}
                               <div className="flex flex-wrap gap-2 mt-3">
                                 {isMyCanister && isRunning && (
-                                  <button onClick={() => stopCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 rounded-lg hover:bg-yellow-500/20 transition-colors">Stop</button>
+                                  <button onClick={() => stopCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:bg-surface-700 hover:text-white transition-colors">Stop</button>
                                 )}
                                 {isMyCanister && isStopped && (
                                   <>
-                                    <button onClick={() => startCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg hover:bg-green-500/20 transition-colors">Start</button>
-                                    <button onClick={() => deleteCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg hover:bg-red-500/20 transition-colors">Delete</button>
+                                    <button onClick={() => startCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:bg-surface-700 hover:text-white transition-colors">Start</button>
+                                    <button onClick={() => deleteCanister(c.name)} className="px-3 py-1.5 text-[11px] font-medium bg-transparent text-red-400 border border-red-500/25 rounded-lg hover:bg-red-500/10 hover:text-red-300 transition-colors">Delete</button>
                                   </>
                                 )}
                                 {isMyCanister && hasData && (
                                   <>
-                                    <button onClick={() => setTopUpModal({ canisterName: c.name })} className="px-3 py-1.5 text-[11px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg hover:bg-blue-500/20 transition-colors">Top Up</button>
-                                    <button onClick={() => setControllersModal({ canisterName: c.name, controllers })} className="px-3 py-1.5 text-[11px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded-lg hover:bg-purple-500/20 transition-colors">Controllers</button>
+                                    <button onClick={() => setTopUpModal({ canisterName: c.name })} className="px-3 py-1.5 text-[11px] font-medium bg-icp-500/10 text-icp-200 border border-icp-400/25 rounded-lg hover:bg-icp-500/20 hover:text-white transition-colors">Top Up</button>
+                                    <button onClick={() => setControllersModal({ canisterName: c.name, controllers })} className="px-3 py-1.5 text-[11px] font-medium bg-surface-800 text-gray-300 border border-surface-700 rounded-lg hover:bg-surface-700 hover:text-white transition-colors">Controllers</button>
                                     {network !== 'local' && (
                                       <button
                                         onClick={() => setAutoTopUpModal({ canisterName: c.name })}
@@ -4370,6 +4471,7 @@
           <TopUpModal
             isOpen={!!topUpModal}
             canisterName={topUpModal?.canisterName || ''}
+            network={topUpModal?.network || network}
             onClose={() => setTopUpModal(null)}
             icpBalance={topUpModal?.fleet ? fleetBalances.icp : icpBalance}
             cyclesBalance={topUpModal?.fleet ? fleetBalances.cycles : cyclesBalance}
@@ -4416,7 +4518,7 @@
                   {t.type === 'success' && <span>✓</span>}
                   {t.type === 'error' && <span>✗</span>}
                   {t.message}
-                  <button onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} className="ml-2 text-gray-500 hover:text-white text-xs">×</button>
+                  <button onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))} aria-label="Dismiss notification" className="ml-2 text-gray-500 hover:text-white text-xs">×</button>
                 </div>
               ))}
             </div>

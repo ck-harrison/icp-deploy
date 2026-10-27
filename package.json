@@ -2,6 +2,7 @@
   "name": "icp-deploy",
   "version": "1.0.0",
   "description": "Local browser dashboard for deploying and managing Internet Computer (ICP) canisters",
+  "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -5,7 +5,11 @@ browser dashboard for deploying and managing [Internet Computer](https://interne
 canisters. It runs the `icp` CLI for you, so day-to-day jobs like deploying, topping up
 cycles, snapshotting and checking on every canister you own become point-and-click.
 
-Everything runs on your own machine. No accounts, no cloud, no telemetry.
+Everything runs on your own machine. No accounts and no telemetry: the dashboard
+talks only to the Internet Computer, the public CDNs that serve the page's
+libraries (React, Babel and Tailwind, pinned to exact versions), and, for Fleet's
+"behind" check, your projects' git remotes. It also turns off the `icp` CLI's own
+anonymous telemetry for the commands it runs.
 
 ## What it does
 
@@ -16,7 +20,7 @@ Everything runs on your own machine. No accounts, no cloud, no telemetry.
 - **Cycles**: mint cycles from ICP, top up canisters, see your spending history
 - **Auto top-up**: refill a canister automatically when it drops below a threshold you set
 - **Identities**: switch between and rename your `icp` identities. Creating, importing and exporting stay in the terminal, so the dashboard never handles private keys
-- **Safety rails**: every mainnet deploy asks first; reinstall and delete make you type a confirmation phrase
+- **Safety rails**: every mainnet deploy asks first; reinstall, delete, and restoring a snapshot outside Local make you type a confirmation phrase; minting asks twice
 
 ## Platform support
 
@@ -89,7 +93,8 @@ of this guide.
 Use this tab to put new code on a canister.
 
 1. **Identity**: check which identity will deploy. Changing it here changes the
-   `icp` CLI's default identity for your whole machine, including your terminal.
+   `icp` CLI's default identity for your whole machine, including your terminal
+   (the deploy itself passes the identity explicitly).
    **Rename** is available; to create, import or export an identity, use
    `icp identity new`, `icp identity import` or `icp identity export` in the terminal.
 2. **Deploy mode**:
@@ -136,7 +141,10 @@ back if it goes wrong.
    starts it again.
 3. From the list you can **restore** a snapshot (puts the canister back exactly as
    it was), **delete** it, or **download** it to a folder on your machine.
-4. **Upload from Directory** loads a previously downloaded snapshot back onto the canister.
+   Restoring needs the canister stopped first (use **Stop** on the Canisters tab),
+   and outside Local it asks you to type a phrase.
+4. **Upload from Directory** loads a previously downloaded snapshot back onto the
+   canister. It also needs the canister stopped.
 5. **Extract Data** reads metadata such as the canister's Candid interface.
 
 ### Fleet
@@ -194,7 +202,8 @@ whatever you set.
 
 | Symptom | Fix |
 |---------|-----|
-| No CLI version in the header, every action fails | The `icp` CLI is not installed or not on your `PATH`. Install it and restart the dashboard. |
+| A red "icp CLI was not found" banner, and "icp CLI not found" in the header | The `icp` CLI is not installed or not on your `PATH`. Install it and restart the dashboard. The terminal running the server prints the same warning at startup. |
+| The page is blank | The page loads React, Babel and Tailwind from public CDNs, so it needs an internet connection. Check the browser console. |
 | Dock app opens but nothing works | Re-run `bash scripts/make-launcher.sh` so it picks up where `node` and `icp` live now. |
 | Asset canisters show "Not accessible" with icp 1.0.0 | Update `@dfinity/asset-canister@v2.1.0` to `@dfinity/asset-canister@v2.2.1` in the project's `icp.yaml`. |
 | A canister shows "Outdated" | The code on chain differs from your last local build. Deploy it. |
