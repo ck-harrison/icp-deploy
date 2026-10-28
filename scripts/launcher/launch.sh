@@ -19,6 +19,15 @@
 
 set -uo pipefail
 
+# On Apple Silicon, LaunchServices starts an app whose executable is a script
+# under Rosetta, and that Intel preference is inherited by everything spawned
+# below it. Apple's /usr/bin/git shim then fails ("unable to load libxcrun …
+# need 'x86_64'"), which made Fleet report every project as "not a git
+# repository". Re-exec natively before doing anything else.
+if [ "$(/usr/sbin/sysctl -in sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+  exec /usr/bin/arch -arm64 /bin/bash "$0" "$@"
+fi
+
 REPO="@@REPO@@"
 NODE="@@NODE@@"
 export PATH="@@PATH@@"

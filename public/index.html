@@ -298,7 +298,7 @@
       {
         title: 'Getting started',
         items: [
-          'Paste the path to an ICP project folder (one with an icp.yaml or dfx.json) into the box at the top and press Enter, or click Browse.',
+          'Paste the path to an ICP project folder (one with an icp.yaml or dfx.json) into the box at the top and press Enter, or click the folder icon to browse.',
           'Pick a network with the switch on the right: Local (your own replica on this machine) or Production (mainnet). Other environments from icp.yaml appear there too.',
           'For Local, start the replica with the Start button next to "Replica" in the header.',
           'Recent projects are remembered, so next time you can pick one from the list.',
@@ -318,16 +318,16 @@
         items: [
           'The balances in the header belong to your current identity. Click them to see your spending history.',
           'Mint turns ICP into cycles. Top Up sends cycles to a canister.',
-          'Auto top-up refills a canister when it drops below a threshold you set. The server checks every 5 minutes, but only while it is running: close it and the top-ups stop.',
+          'Auto top-up refills a canister to a target when it drops below a threshold you set. The server checks every 5 minutes, but only while it is running: close it and the top-ups stop.',
           'Staging is not the same as a test network. A staging environment usually runs on mainnet and spends real cycles. Check the network badge on each row.',
         ],
       },
       {
         title: 'Safety',
         items: [
-          'Every mainnet deploy asks for confirmation. Reinstall, Delete, and restoring a snapshot outside Local make you type a phrase first, because they destroy data. Minting asks twice, because it spends ICP.',
+          'Every deploy outside Local asks for confirmation. Reinstall and Delete always make you type a phrase first, and so does restoring a snapshot outside Local, because they destroy data. Minting asks twice, because it spends ICP.',
           'The dashboard only listens on this computer (127.0.0.1). Never expose its port to a network: it can spend your cycles and delete your canisters.',
-          "It uses your normal icp CLI identities and never handles private keys. Create, import and export identities in the terminal. There is no telemetry: the dashboard only talks to the Internet Computer, the public CDNs that serve this page's code, and (for Fleet's \"behind\" check) your projects' git remotes.",
+          "It uses the identities you already have in the icp CLI and never handles private keys. There is no telemetry: the dashboard only talks to the Internet Computer, the public CDNs that serve this page's code, and (for Fleet's \"behind\" check) your projects' git remotes.",
           'Switching identity here changes the default for the icp CLI on your whole machine, including your terminal.',
         ],
       },
@@ -335,7 +335,7 @@
         title: 'Troubleshooting',
         items: [
           'Every action fails, or no CLI version shows in the header: the icp CLI is not installed or not on your PATH. Install it, then restart the dashboard.',
-          'Local replica fails to start (exit status 101): another program is using port 8000. Set a different gateway port in the project\'s icp.yaml (see the README).',
+          'Local replica fails to start: another program is probably using port 8000. Set a different gateway port in the project\'s icp.yaml (see the README).',
           'Fleet is missing canisters: your local copy of that project may be out of date. Fleet warns when a project is behind its git remote; pull and refresh.',
           'A canister shows "Outdated": the code on chain differs from your last local build. Deploy to bring it up to date.',
           'Something else: the browser console and the terminal running the server both show the underlying CLI error.',
@@ -1780,7 +1780,8 @@
       // Could not compare with the remote: say so rather than counting these as
       // current. A failed fetch leaves the counts as of the previous fetch.
       const gitUnchecked = gitProjects.filter((g) => !g.repo || !g.upstream || !g.fetched);
-      const gitUncheckedReason = (g) => !g.repo ? 'not a git repository'
+      const gitUncheckedReason = (g) => g.gitError ? `git failed: ${g.gitError}`
+        : !g.repo ? 'not a git repository'
         : !g.upstream ? `branch ${g.branch || '?'} tracks no remote`
         : `could not reach the remote${g.fetchError ? `: ${g.fetchError}` : ''}`;
       const tierCounts = {
@@ -3689,7 +3690,7 @@
                       >Rename</button>
                     </div>
                     <p className="mt-2 text-[11px] text-gray-500">
-                      To create, import or export an identity, use the terminal: <span className="font-mono">icp identity new</span>, <span className="font-mono">import</span> or <span className="font-mono">export</span>. The dashboard never handles private keys.
+                      Uses your existing icp CLI identities. To make a new one, run <span className="font-mono">icp identity new</span> in the terminal. The dashboard never handles private keys.
                     </p>
                     {principal && (
                       <div className="mt-2 flex items-center gap-1.5">

@@ -1156,9 +1156,14 @@ function runGitAsync(args, cwd, timeoutMs = 20000) {
 app.get('/api/fleet/git-status', async (req, res) => {
   const { projects } = fleetCandidateProjects(readSettings());
   const results = await mapWithConcurrency(projects, 4, async (proj) => {
-    const out = { path: proj.path, name: proj.name, repo: false, branch: null, upstream: null, fetched: false, fetchError: null, behind: null, ahead: null, dirty: null };
+    const out = { path: proj.path, name: proj.name, repo: false, gitError: null, branch: null, upstream: null, fetched: false, fetchError: null, behind: null, ahead: null, dirty: null };
     const inside = await runGitAsync(['rev-parse', '--is-inside-work-tree'], proj.path);
-    if (!inside.ok || inside.data !== 'true') return out;
+    if (!inside.ok || inside.data !== 'true') {
+      // Only git's own answer means "not a repo". Anything else (git missing,
+      // a permission error, a timeout) is reported, not mislabelled.
+      if (!/not a git repository/i.test(inside.data)) out.gitError = inside.data.split('\n').pop();
+      return out;
+    }
     out.repo = true;
     const branch = await runGitAsync(['rev-parse', '--abbrev-ref', 'HEAD'], proj.path);
     out.branch = branch.ok ? branch.data : null;
